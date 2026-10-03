@@ -1,0 +1,15 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "woocommerce-mcp-server",
+  "main": "worker.py",
+  "compatibility_date": "2024-09-23",
+  "compatibility_flags": [
+    "python_workers"
+  ],
+  "vars": {
+    "MCP_RATE_LIMIT_MAX_REQUESTS": "50",
+    "MCP_RATE_LIMIT_WINDOW_SECONDS": "10",
+    "WOOCOMMERCE_MAX_RETRIES": "3",
+    "WOOCOMMERCE_TIMEOUT_SECONDS": "15"
+  }
+}

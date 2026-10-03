@@ -1,0 +1,17 @@
+name = "woocommerce-mcp-server"
+main = "worker.py"
+compatibility_date = "2024-09-23"
+compatibility_flags = ["python_workers"]
+
+# Default non-sensitive environment variables
+[vars]
+MCP_RATE_LIMIT_MAX_REQUESTS = "50"
+MCP_RATE_LIMIT_WINDOW_SECONDS = "10"
+WOOCOMMERCE_MAX_RETRIES = "3"
+WOOCOMMERCE_TIMEOUT_SECONDS = "15"
+
+# Secrets to be configured via Cloudflare Dashboard or `npx wrangler secret put`:
+# - WOOCOMMERCE_STORE_URL
+# - WOOCOMMERCE_CONSUMER_KEY
+# - WOOCOMMERCE_CONSUMER_SECRET
+# - MCP_AUTH_TOKEN
