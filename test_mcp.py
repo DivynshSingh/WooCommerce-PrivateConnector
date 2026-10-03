@@ -28,12 +28,20 @@ if parent_dir not in sys.path:
 if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
 
-from woocommerce_mcp.auth import Authenticator
-from woocommerce_mcp.config import ServerConfig
-from woocommerce_mcp.rate_limiter import RateLimiter
-from woocommerce_mcp.server import MCPServer
-from woocommerce_mcp.tools import execute_tool, get_tool_definitions, validate_input
-from woocommerce_mcp.wc_client import WooCommerceAPIError, WooCommerceClient
+try:
+    from auth import Authenticator
+    from config import ServerConfig
+    from rate_limiter import RateLimiter
+    from server import MCPServer
+    from tools import execute_tool, get_tool_definitions, validate_input
+    from wc_client import WooCommerceAPIError, WooCommerceClient
+except ImportError:
+    from woocommerce_mcp.auth import Authenticator
+    from woocommerce_mcp.config import ServerConfig
+    from woocommerce_mcp.rate_limiter import RateLimiter
+    from woocommerce_mcp.server import MCPServer
+    from woocommerce_mcp.tools import execute_tool, get_tool_definitions, validate_input
+    from woocommerce_mcp.wc_client import WooCommerceAPIError, WooCommerceClient
 
 
 GREEN = "\033[92m"

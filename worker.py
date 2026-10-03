@@ -3,8 +3,15 @@ Cloudflare Workers Python Entrypoint for WooCommerce MCP Server.
 """
 
 import json
-from .config import ServerConfig
-from .server import MCPServer
+import os
+import sys
+
+_dir = os.path.dirname(os.path.abspath(__file__))
+if _dir not in sys.path:
+    sys.path.insert(0, _dir)
+
+from config import ServerConfig
+from server import MCPServer
 
 
 _server_instance = None

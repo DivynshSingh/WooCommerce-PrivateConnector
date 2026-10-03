@@ -1,6 +1,13 @@
 import json
 from typing import Any, Dict, List, Optional, Tuple
-from .wc_client import WooCommerceClient, WooCommerceAPIError
+import os
+import sys
+
+_dir = os.path.dirname(os.path.abspath(__file__))
+if _dir not in sys.path:
+    sys.path.insert(0, _dir)
+
+from wc_client import WooCommerceClient, WooCommerceAPIError
 
 # Definition of available MCP tools according to MCP Specification
 TOOLS_METADATA = [

@@ -7,11 +7,17 @@ import threading
 import urllib.parse
 from typing import Any, Dict, Optional, Tuple
 
-from .auth import Authenticator
-from .config import ServerConfig
-from .rate_limiter import RateLimiter
-from .tools import execute_tool, get_tool_definitions
-from .wc_client import WooCommerceClient
+import os
+
+_dir = os.path.dirname(os.path.abspath(__file__))
+if _dir not in sys.path:
+    sys.path.insert(0, _dir)
+
+from auth import Authenticator
+from config import ServerConfig
+from rate_limiter import RateLimiter
+from tools import execute_tool, get_tool_definitions
+from wc_client import WooCommerceClient
 
 logger = logging.getLogger("woocommerce_mcp")
 
