@@ -78,17 +78,24 @@ def get_server_for_env(env) -> MCPServer:
     consumer_key = get_var("WOOCOMMERCE_CONSUMER_KEY", "")
     consumer_secret = get_var("WOOCOMMERCE_CONSUMER_SECRET", "")
 
-    # OAuth 2.1 Configuration
+    # OAuth 2.1 Configuration (Auth0 with RFC 7591 Dynamic Client Registration)
     oauth_auth_server_url = (
         get_var("OAUTH_AUTH_SERVER_URL", "").rstrip("/")
-        or "https://esommvnvcatygpciqdps.supabase.co/auth/v1"
+        or "https://woocommerce-mcp-server.us.auth0.com"
     )
     oauth_jwks_url = (
         get_var("OAUTH_JWKS_URL", "")
-        or "https://esommvnvcatygpciqdps.supabase.co/auth/v1/.well-known/jwks.json"
+        or f"{oauth_auth_server_url}/.well-known/jwks.json"
     )
-    oauth_audience = get_var("OAUTH_AUDIENCE", "")
-    oauth_issuer = get_var("OAUTH_ISSUER", "").rstrip("/") or oauth_auth_server_url
+    oauth_audience = (
+        get_var("OAUTH_AUDIENCE", "")
+        or "https://woocommerce-mcp-server.workers.dev"
+    )
+    oauth_issuer = (
+        get_var("OAUTH_ISSUER", "").rstrip("/") or oauth_auth_server_url
+    )
+    if not oauth_issuer.endswith("/"):
+        oauth_issuer += "/"
     oauth_resource_url = (
         get_var("OAUTH_RESOURCE_SERVER_URL", "").rstrip("/")
         or get_var("RESOURCE_SERVER_URL", "").rstrip("/")
@@ -110,6 +117,16 @@ def get_server_for_env(env) -> MCPServer:
         rate_limit_window = 10
 
     try:
+        unauth_rate_limit_max = int(get_var("UNAUTH_RATE_LIMIT_MAX_REQUESTS", "20"))
+    except ValueError:
+        unauth_rate_limit_max = 20
+
+    try:
+        unauth_rate_limit_window = int(get_var("UNAUTH_RATE_LIMIT_WINDOW_SECONDS", "60"))
+    except ValueError:
+        unauth_rate_limit_window = 60
+
+    try:
         wc_max_retries = int(get_var("WOOCOMMERCE_MAX_RETRIES", "3"))
     except ValueError:
         wc_max_retries = 3
@@ -126,6 +143,7 @@ def get_server_for_env(env) -> MCPServer:
             _server_instance.config.store_url == store_url
             and _server_instance.config.consumer_key == consumer_key
             and _server_instance.config.consumer_secret == consumer_secret
+            and _server_instance.config.oauth_auth_server_url == oauth_auth_server_url
         ):
             return _server_instance
 
@@ -141,6 +159,8 @@ def get_server_for_env(env) -> MCPServer:
         jwks_cache_ttl_seconds=jwks_ttl,
         rate_limit_max_requests=rate_limit_max,
         rate_limit_window_seconds=rate_limit_window,
+        unauth_rate_limit_max_requests=unauth_rate_limit_max,
+        unauth_rate_limit_window_seconds=unauth_rate_limit_window,
         wc_max_retries=wc_max_retries,
         wc_timeout_seconds=wc_timeout,
     )
@@ -217,8 +237,58 @@ async def on_fetch(request, env):
             headers=Headers.new(cors_headers_list),
         )
 
+    # Extract incoming headers safely via Web API
+    req_headers = {}
+    for h in ("authorization", "content-type", "user-agent", "cf-connecting-ip", "x-forwarded-for", "x-real-ip"):
+        try:
+            val = request.headers.get(h)
+            if val is not None:
+                req_headers[h] = str(val)
+        except Exception:
+            pass
+
+    try:
+        if hasattr(request.headers, "entries"):
+            for entry in request.headers.entries():
+                k = str(entry[0]).lower()
+                v = str(entry[1])
+                req_headers[k] = v
+    except Exception:
+        pass
+
+    def extract_client_ip() -> str:
+        ip = req_headers.get("cf-connecting-ip")
+        if not ip:
+            xff = req_headers.get("x-forwarded-for")
+            if xff:
+                ip = xff.split(",")[0].strip()
+        if not ip:
+            ip = req_headers.get("x-real-ip")
+        if not ip and hasattr(request, "headers"):
+            try:
+                ip = request.headers.get("cf-connecting-ip") or request.headers.get("x-forwarded-for")
+                if ip and "," in str(ip):
+                    ip = str(ip).split(",")[0].strip()
+            except Exception:
+                pass
+        return str(ip).strip() if ip else "127.0.0.1"
+
     # 3. RFC 9728 Protected Resource Metadata endpoint
     if method == "GET" and path == "/.well-known/oauth-protected-resource":
+        # Unauthenticated / IP-based rate limiting on discovery endpoint
+        client_ip = extract_client_ip()
+        allowed, retry_after = server.unauth_rate_limiter.check_limit(client_ip)
+        if not allowed:
+            err_body = json.dumps({
+                "error": "too_many_requests",
+                "message": f"Rate limit exceeded for discovery endpoint. Retry after {retry_after} seconds.",
+            })
+            return Response.new(
+                err_body,
+                status=429,
+                headers=create_json_headers([["Retry-After", str(retry_after)]]),
+            )
+
         auth_servers = []
         if server.config.oauth_auth_server_url:
             auth_servers.append(server.config.oauth_auth_server_url)
@@ -249,6 +319,7 @@ async def on_fetch(request, env):
             "version": "1.0.0",
             "protocol": "mcp-2024-11-05",
             "auth_type": "OAuth 2.1 (Stateless JWT)",
+            "auth_server": server.config.oauth_auth_server_url or None,
             "store_url": server.config.store_url or None,
             "woocommerce_configured": server.config.has_woocommerce_credentials,
             "protected_resource_metadata": resource_metadata_url,
@@ -268,31 +339,29 @@ async def on_fetch(request, env):
             headers=create_json_headers(),
         )
 
-    # 6. Extract incoming headers safely via Web API
-    req_headers = {}
-    for h in ("authorization", "x-api-key", "content-type", "user-agent"):
-        try:
-            val = request.headers.get(h)
-            if val is not None:
-                req_headers[h] = str(val)
-        except Exception:
-            pass
-
-    try:
-        if hasattr(request.headers, "entries"):
-            for entry in request.headers.entries():
-                k = str(entry[0]).lower()
-                v = str(entry[1])
-                req_headers[k] = v
-    except Exception:
-        pass
-
-    # 7. OAuth 2.1 Stateless JWT Authentication with WWW-Authenticate 401 challenge
+    # 6. OAuth 2.1 Stateless JWT Authentication with WWW-Authenticate 401 challenge
     is_auth, client_id, auth_err = await server.authenticator.authenticate_request_async(
         req_headers
     )
 
     if not is_auth:
+        # Pre-auth handshake: rate-limited by client IP
+        client_ip = extract_client_ip()
+        allowed, retry_after = server.unauth_rate_limiter.check_limit(client_ip)
+        if not allowed:
+            err_res = {
+                "jsonrpc": "2.0",
+                "error": {
+                    "code": -32001,
+                    "message": f"Too many unauthenticated requests from IP. Retry after {retry_after} seconds.",
+                },
+            }
+            return Response.new(
+                json.dumps(err_res),
+                status=429,
+                headers=create_json_headers([["Retry-After", str(retry_after)]]),
+            )
+
         err_res = {
             "jsonrpc": "2.0",
             "error": {
@@ -309,7 +378,7 @@ async def on_fetch(request, env):
             ]),
         )
 
-    # 8. Check Rate Limit
+    # 7. Check Authenticated Client Rate Limit (keyed by client_id = oauth-<sha256(sub)[:12]>)
     allowed, retry_after = server.rate_limiter.check_limit(client_id or "unknown")
     if not allowed:
         err_res = {
@@ -326,7 +395,7 @@ async def on_fetch(request, env):
             headers=create_json_headers([["Retry-After", str(retry_after)]]),
         )
 
-    # 9. Read and parse JSON-RPC request body
+    # 8. Read and parse JSON-RPC request body
     try:
         body_text = await request.text()
         rpc_req = json.loads(body_text) if body_text else None

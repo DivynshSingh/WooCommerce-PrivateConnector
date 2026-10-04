@@ -36,6 +36,8 @@ class ServerConfig:
     jwks_cache_ttl_seconds: int = 300
     rate_limit_max_requests: int = 50
     rate_limit_window_seconds: int = 10
+    unauth_rate_limit_max_requests: int = 20
+    unauth_rate_limit_window_seconds: int = 60
     wc_max_retries: int = 3
     wc_timeout_seconds: float = 15.0
 
@@ -52,20 +54,25 @@ class ServerConfig:
         consumer_key = os.environ.get("WOOCOMMERCE_CONSUMER_KEY", "").strip()
         consumer_secret = os.environ.get("WOOCOMMERCE_CONSUMER_SECRET", "").strip()
 
-        # OAuth 2.1 Configuration
+        # OAuth 2.1 Configuration (Auth0 with RFC 7591 Dynamic Client Registration)
         oauth_auth_server_url = (
             os.environ.get("OAUTH_AUTH_SERVER_URL", "").strip().rstrip("/")
-            or "https://esommvnvcatygpciqdps.supabase.co/auth/v1"
+            or "https://woocommerce-mcp-server.us.auth0.com"
         )
         oauth_jwks_url = (
             os.environ.get("OAUTH_JWKS_URL", "").strip()
-            or "https://esommvnvcatygpciqdps.supabase.co/auth/v1/.well-known/jwks.json"
+            or f"{oauth_auth_server_url}/.well-known/jwks.json"
         )
-        oauth_audience = os.environ.get("OAUTH_AUDIENCE", "").strip()
+        oauth_audience = (
+            os.environ.get("OAUTH_AUDIENCE", "").strip()
+            or "https://woocommerce-mcp-server.workers.dev"
+        )
         oauth_issuer = (
             os.environ.get("OAUTH_ISSUER", "").strip().rstrip("/")
             or oauth_auth_server_url
         )
+        if not oauth_issuer.endswith("/"):
+            oauth_issuer += "/"
         oauth_resource_url = (
             os.environ.get("OAUTH_RESOURCE_SERVER_URL", "").strip().rstrip("/")
             or os.environ.get("RESOURCE_SERVER_URL", "").strip().rstrip("/")
@@ -85,6 +92,16 @@ class ServerConfig:
             rate_limit_window = int(os.environ.get("MCP_RATE_LIMIT_WINDOW_SECONDS", "10"))
         except ValueError:
             rate_limit_window = 10
+
+        try:
+            unauth_rate_limit_max = int(os.environ.get("UNAUTH_RATE_LIMIT_MAX_REQUESTS", "20"))
+        except ValueError:
+            unauth_rate_limit_max = 20
+
+        try:
+            unauth_rate_limit_window = int(os.environ.get("UNAUTH_RATE_LIMIT_WINDOW_SECONDS", "60"))
+        except ValueError:
+            unauth_rate_limit_window = 60
 
         try:
             wc_max_retries = int(os.environ.get("WOOCOMMERCE_MAX_RETRIES", "3"))
@@ -108,6 +125,8 @@ class ServerConfig:
             jwks_cache_ttl_seconds=jwks_ttl,
             rate_limit_max_requests=rate_limit_max,
             rate_limit_window_seconds=rate_limit_window,
+            unauth_rate_limit_max_requests=unauth_rate_limit_max,
+            unauth_rate_limit_window_seconds=unauth_rate_limit_window,
             wc_max_retries=wc_max_retries,
             wc_timeout_seconds=wc_timeout,
         )

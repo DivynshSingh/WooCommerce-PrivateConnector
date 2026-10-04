@@ -48,6 +48,11 @@ class MCPServer:
             max_requests=config.rate_limit_max_requests,
             window_seconds=config.rate_limit_window_seconds,
         )
+        self.auth_rate_limiter = self.rate_limiter
+        self.unauth_rate_limiter = RateLimiter(
+            max_requests=config.unauth_rate_limit_max_requests,
+            window_seconds=config.unauth_rate_limit_window_seconds,
+        )
         self.wc_client = WooCommerceClient(
             store_url=config.store_url,
             consumer_key=config.consumer_key,

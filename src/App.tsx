@@ -12,57 +12,79 @@ export default function App() {
             <span className="w-3 h-3 rounded-full bg-emerald-500 inline-block animate-pulse"></span>
             <span className="font-semibold text-slate-100">WooCommerce MCP Server</span>
           </div>
-          <span className="text-xs bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2 py-0.5 rounded">
-            OAuth 2.1 Active
-          </span>
+          <div className="flex items-center space-x-2">
+            <span className="text-xs bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 px-2 py-0.5 rounded">
+              Auth0 DCR Active
+            </span>
+            <span className="text-xs bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2 py-0.5 rounded">
+              Dual Rate Limit
+            </span>
+          </div>
         </div>
 
         <p className="text-sm text-slate-400 leading-relaxed">
-          Headless Model Context Protocol (MCP) server engineered for Cloudflare Workers (Pyodide) with non-blocking async execution, strict pagination (max 15/page), and OAuth 2.1 stateless JWT authentication.
+          Cloudflare Worker-based WooCommerce Model Context Protocol (MCP) server. Acts as an RFC 9728 OAuth 2.0 Protected Resource Server paired with Auth0 for RFC 7591 Dynamic Client Registration (DCR) and dual-layer rate limiting.
         </p>
 
         <div className="bg-slate-950 rounded-lg p-4 text-xs space-y-2.5 border border-slate-800/80">
           <div className="flex justify-between items-center pb-2 border-b border-slate-800/60 text-slate-400 font-semibold">
-            <span>CONFIGURED ENDPOINTS</span>
-            <span className="text-emerald-400 font-mono text-[11px]">RFC 9728 Compliant</span>
+            <span>CONFIGURED AUTH0 & MCP ENDPOINTS</span>
+            <span className="text-emerald-400 font-mono text-[11px]">RFC 9728 & RFC 7591</span>
           </div>
           <div>
-            <span className="text-slate-500 block">Auth Server (Supabase):</span>
-            <code className="text-indigo-400 break-all">https://esommvnvcatygpciqdps.supabase.co/auth/v1</code>
+            <span className="text-slate-500 block">Domain Base URL:</span>
+            <code className="text-indigo-400 break-all">https://woocommerce-mcp-server.us.auth0.com</code>
           </div>
           <div>
-            <span className="text-slate-500 block">JWKS Endpoint (ES256):</span>
-            <code className="text-sky-400 break-all">https://esommvnvcatygpciqdps.supabase.co/auth/v1/.well-known/jwks.json</code>
+            <span className="text-slate-500 block">Dynamic Client Registration (DCR):</span>
+            <code className="text-amber-400 break-all">https://woocommerce-mcp-server.us.auth0.com/oidc/register</code>
           </div>
           <div>
-            <span className="text-slate-500 block">WooCommerce Store:</span>
+            <span className="text-slate-500 block">Authorization Endpoint:</span>
+            <code className="text-slate-300 break-all">https://woocommerce-mcp-server.us.auth0.com/authorize</code>
+          </div>
+          <div>
+            <span className="text-slate-500 block">Token Endpoint:</span>
+            <code className="text-slate-300 break-all">https://woocommerce-mcp-server.us.auth0.com/oauth/token</code>
+          </div>
+          <div>
+            <span className="text-slate-500 block">JWKS Endpoint (RS256):</span>
+            <code className="text-sky-400 break-all">https://woocommerce-mcp-server.us.auth0.com/.well-known/jwks.json</code>
+          </div>
+          <div>
+            <span className="text-slate-500 block">OpenID Discovery:</span>
+            <code className="text-slate-400 break-all">https://woocommerce-mcp-server.us.auth0.com/.well-known/openid-configuration</code>
+          </div>
+          <div>
+            <span className="text-slate-500 block">WooCommerce Store Target:</span>
             <code className="text-emerald-400 break-all">https://dev-anythingstore37.pantheonsite.io</code>
           </div>
-          <div>
-            <span className="text-slate-500 block">MCP RPC Route:</span>
-            <code className="text-amber-400">POST /mcp</code>
-          </div>
-          <div>
-            <span className="text-slate-500 block">Protected Resource Metadata:</span>
-            <code className="text-slate-300">GET /.well-known/oauth-protected-resource</code>
+          <div className="pt-2 border-t border-slate-900 grid grid-cols-2 gap-2 text-[11px]">
+            <div>
+              <span className="text-slate-500 block">Unauth / IP Limit:</span>
+              <span className="text-amber-400 font-bold">20 reqs / 60s</span>
+            </div>
+            <div>
+              <span className="text-slate-500 block">Authenticated Client Limit:</span>
+              <span className="text-emerald-400 font-bold">50 reqs / 10s</span>
+            </div>
           </div>
         </div>
 
         <div className="bg-indigo-950/30 border border-indigo-500/20 rounded-lg p-4 text-xs space-y-2 text-indigo-200">
           <div className="font-semibold text-indigo-300 flex items-center space-x-1.5">
-            <span>Testing with Glamour / MCP Inspector</span>
+            <span>Client Connection & Discovery</span>
           </div>
-          <ol className="list-decimal list-inside space-y-1 text-slate-400">
-            <li>Set Transport: <strong className="text-slate-200">Streamable HTTP</strong></li>
-            <li>Server URL: <strong className="text-slate-200">https://woocommerce-mcp-server.woocommerce-connector.workers.dev/mcp</strong></li>
-            <li>Add Request Header: <strong className="text-slate-200">Authorization: Bearer &lt;SUPABASE_ACCESS_TOKEN&gt;</strong></li>
-            <li>Execute <strong className="text-emerald-300">list_products</strong> to query your Pantheon store</li>
-          </ol>
+          <ul className="space-y-1.5 text-slate-400">
+            <li>• <strong className="text-slate-200">Discovery:</strong> MCP clients fetch <code className="text-sky-300">/.well-known/oauth-protected-resource</code> to discover your Auth0 domain.</li>
+            <li>• <strong className="text-slate-200">DCR (RFC 7591):</strong> AI clients (Claude Desktop, Cursor) register automatically via <code className="text-amber-300">/oidc/register</code>.</li>
+            <li>• <strong className="text-slate-200">Execution:</strong> Authorized calls carry <code className="text-slate-200">Authorization: Bearer &lt;JWT&gt;</code> verified against Auth0 JWKS.</li>
+          </ul>
         </div>
 
         <div className="text-xs text-slate-500 flex justify-between items-center pt-2 border-t border-slate-800/80">
-          <span>Deploy: <code className="text-slate-400">wrangler deploy</code></span>
-          <span>Verification: <code className="text-emerald-400">python3 test_mcp.py</code> (10/10 PASS)</span>
+          <span>Self-contained: <code className="text-slate-400">woocommerce_mcp/</code></span>
+          <span>Verification: <code className="text-emerald-400">python3 test_mcp.py</code> (12/12 PASS)</span>
         </div>
       </div>
     </div>
