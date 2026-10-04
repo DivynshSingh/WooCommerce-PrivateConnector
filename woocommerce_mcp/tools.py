@@ -280,11 +280,11 @@ def validate_input(tool_name: str, arguments: Dict[str, Any]) -> Tuple[bool, Opt
     return True, None
 
 
-def execute_tool(
+async def execute_tool(
     tool_name: str, arguments: Dict[str, Any], wc_client: WooCommerceClient
 ) -> Dict[str, Any]:
     """
-    Executes tool with input validation, error handling, and structured MCP output.
+    Asynchronously executes tool with input validation, error handling, and structured MCP output.
     Returns standard MCP tool result dictionary:
     {"content": [{"type": "text", "text": "..."}], "isError": bool}
     """
@@ -297,59 +297,59 @@ def execute_tool(
         }
 
     try:
-        # 2. Dispatch to WooCommerce Client
+        # 2. Dispatch to WooCommerce Client with await
         if tool_name == "search_products":
-            res = wc_client.search_products(
+            res = await wc_client.search_products(
                 query=arguments.get("query"),
                 category=arguments.get("category"),
                 status=arguments.get("status"),
                 min_price=arguments.get("min_price"),
                 max_price=arguments.get("max_price"),
                 page=arguments.get("page", 1),
-                per_page=arguments.get("per_page", 10),
+                per_page=min(int(arguments.get("per_page", 10)), 15),
             )
         elif tool_name == "get_product":
-            res = wc_client.get_product(
+            res = await wc_client.get_product(
                 product_id=arguments.get("product_id"),
                 sku=arguments.get("sku"),
             )
         elif tool_name == "list_products":
-            res = wc_client.list_products(
+            res = await wc_client.list_products(
                 stock_status=arguments.get("stock_status"),
                 category=arguments.get("category"),
                 featured=arguments.get("featured"),
                 page=arguments.get("page", 1),
-                per_page=arguments.get("per_page", 10),
+                per_page=min(int(arguments.get("per_page", 10)), 15),
             )
         elif tool_name == "list_orders":
-            res = wc_client.list_orders(
+            res = await wc_client.list_orders(
                 status=arguments.get("status"),
                 customer_id=arguments.get("customer_id"),
                 after=arguments.get("after"),
                 before=arguments.get("before"),
                 page=arguments.get("page", 1),
-                per_page=arguments.get("per_page", 10),
+                per_page=min(int(arguments.get("per_page", 10)), 15),
             )
         elif tool_name == "get_order":
-            res = wc_client.get_order(order_id=arguments["order_id"])
+            res = await wc_client.get_order(order_id=arguments["order_id"])
         elif tool_name == "update_product_stock":
-            res = wc_client.update_product_stock(
+            res = await wc_client.update_product_stock(
                 product_id=arguments["product_id"],
                 stock_quantity=arguments.get("stock_quantity"),
                 stock_status=arguments.get("stock_status"),
                 manage_stock=arguments.get("manage_stock"),
             )
         elif tool_name == "create_product":
-            res = wc_client.create_product(
+            res = await wc_client.create_product(
                 name=arguments["name"],
-                type=arguments.get("type", "simple"),
                 regular_price=arguments.get("regular_price"),
-                description=arguments.get("description"),
-                short_description=arguments.get("short_description"),
-                manage_stock=arguments.get("manage_stock"),
+                description=arguments.get("description", ""),
+                short_description=arguments.get("short_description", ""),
+                manage_stock=arguments.get("manage_stock", False),
                 stock_quantity=arguments.get("stock_quantity"),
                 sku=arguments.get("sku"),
                 categories=arguments.get("categories"),
+                status=arguments.get("status", "publish"),
             )
         else:
             return {

@@ -1,0 +1,6 @@
+{
+  "name": "WooCommerce MCP Server",
+  "description": "Remote Model Context Protocol (MCP) server providing an AI-facing interface to WooCommerce stores with authentication, rate limiting, and robust error handling.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

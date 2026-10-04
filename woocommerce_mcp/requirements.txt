@@ -1,0 +1,2 @@
+# WooCommerce MCP Server Dependencies
+# The server is engineered to run with 0 external dependencies on Python standard library and native Pyodide / WebCrypto.

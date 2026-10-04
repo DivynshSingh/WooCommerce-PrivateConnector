@@ -1,6 +1,5 @@
 """
 Cloudflare Workers Python Entrypoint for WooCommerce MCP Server.
-Deployable directly using Wrangler: `wrangler deploy`
 Implements non-blocking asynchronous WooCommerce REST client,
 manual environment variable injection, OAuth 2.1 RFC 9728 Protected Resource Metadata,
 and JavaScript runtime sequence header compatibility.
@@ -10,18 +9,12 @@ import json
 import os
 import sys
 
-_root = os.path.dirname(os.path.abspath(__file__))
-_pkg = os.path.join(_root, "woocommerce_mcp")
-for p in (_pkg, _root):
-    if p not in sys.path:
-        sys.path.insert(0, p)
+_dir = os.path.dirname(os.path.abspath(__file__))
+if _dir not in sys.path:
+    sys.path.insert(0, _dir)
 
-try:
-    from config import ServerConfig
-    from server import MCPServer
-except ImportError:
-    from woocommerce_mcp.config import ServerConfig
-    from woocommerce_mcp.server import MCPServer
+from config import ServerConfig
+from server import MCPServer
 
 _server_instance = None
 
@@ -126,7 +119,9 @@ def get_server_for_env(env) -> MCPServer:
     except ValueError:
         wc_timeout = 15.0
 
+    # Re-use or instantiate server
     if _server_instance is not None:
+        # Check if credentials updated
         if (
             _server_instance.config.store_url == store_url
             and _server_instance.config.consumer_key == consumer_key
@@ -201,6 +196,7 @@ async def on_fetch(request, env):
     resource_metadata_url = f"{worker_origin}/.well-known/oauth-protected-resource"
     www_auth_challenge = f'Bearer realm="mcp", resource_metadata="{resource_metadata_url}"'
 
+    # JS sequence of sequences for Web API Headers compatibility (avoids Sequence TypeErrors)
     cors_headers_list = [
         ["Access-Control-Allow-Origin", "*"],
         ["Access-Control-Allow-Methods", "GET, POST, OPTIONS"],

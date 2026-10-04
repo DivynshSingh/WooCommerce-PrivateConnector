@@ -1,0 +1,4 @@
+# WooCommerce MCP Server Dependencies
+# Note: The server is engineered to run with 0 external dependencies on Python 3.10+ standard library.
+# The following packages can be installed if deploying in an environment that utilizes them.
+python-dotenv>=1.0.0

@@ -1,6 +1,6 @@
 import os
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional
 
 
@@ -28,7 +28,12 @@ class ServerConfig:
     store_url: str
     consumer_key: str
     consumer_secret: str
-    valid_auth_tokens: List[str]
+    oauth_auth_server_url: str = ""
+    oauth_jwks_url: str = ""
+    oauth_audience: str = ""
+    oauth_issuer: str = ""
+    oauth_resource_server_url: str = ""
+    jwks_cache_ttl_seconds: int = 300
     rate_limit_max_requests: int = 50
     rate_limit_window_seconds: int = 10
     wc_max_retries: int = 3
@@ -47,26 +52,29 @@ class ServerConfig:
         consumer_key = os.environ.get("WOOCOMMERCE_CONSUMER_KEY", "").strip()
         consumer_secret = os.environ.get("WOOCOMMERCE_CONSUMER_SECRET", "").strip()
 
-        # Parse MCP client auth tokens
-        tokens: List[str] = []
-        raw_mcp_auth = os.environ.get("MCP_AUTH_CONFIGURATION", "").strip()
-        single_token = os.environ.get("MCP_AUTH_TOKEN", "").strip()
+        # OAuth 2.1 Configuration
+        oauth_auth_server_url = (
+            os.environ.get("OAUTH_AUTH_SERVER_URL", "").strip().rstrip("/")
+            or "https://esommvnvcatygpciqdps.supabase.co/auth/v1"
+        )
+        oauth_jwks_url = (
+            os.environ.get("OAUTH_JWKS_URL", "").strip()
+            or "https://esommvnvcatygpciqdps.supabase.co/auth/v1/.well-known/jwks.json"
+        )
+        oauth_audience = os.environ.get("OAUTH_AUDIENCE", "").strip()
+        oauth_issuer = (
+            os.environ.get("OAUTH_ISSUER", "").strip().rstrip("/")
+            or oauth_auth_server_url
+        )
+        oauth_resource_url = (
+            os.environ.get("OAUTH_RESOURCE_SERVER_URL", "").strip().rstrip("/")
+            or os.environ.get("RESOURCE_SERVER_URL", "").strip().rstrip("/")
+        )
 
-        if raw_mcp_auth:
-            try:
-                parsed = json.loads(raw_mcp_auth)
-                if isinstance(parsed, list):
-                    tokens.extend([str(t).strip() for t in parsed if str(t).strip()])
-                elif isinstance(parsed, dict):
-                    if "tokens" in parsed and isinstance(parsed["tokens"], list):
-                        tokens.extend([str(t).strip() for t in parsed["tokens"]])
-                    else:
-                        tokens.extend([str(v).strip() for v in parsed.values() if str(v).strip()])
-            except json.JSONDecodeError:
-                tokens.extend([t.strip() for t in raw_mcp_auth.split(",") if t.strip()])
-
-        if single_token and single_token not in tokens:
-            tokens.append(single_token)
+        try:
+            jwks_ttl = int(os.environ.get("OAUTH_JWKS_CACHE_TTL_SECONDS", "300"))
+        except ValueError:
+            jwks_ttl = 300
 
         try:
             rate_limit_max = int(os.environ.get("MCP_RATE_LIMIT_MAX_REQUESTS", "50"))
@@ -92,7 +100,12 @@ class ServerConfig:
             store_url=store_url,
             consumer_key=consumer_key,
             consumer_secret=consumer_secret,
-            valid_auth_tokens=tokens,
+            oauth_auth_server_url=oauth_auth_server_url,
+            oauth_jwks_url=oauth_jwks_url,
+            oauth_audience=oauth_audience,
+            oauth_issuer=oauth_issuer,
+            oauth_resource_server_url=oauth_resource_url,
+            jwks_cache_ttl_seconds=jwks_ttl,
             rate_limit_max_requests=rate_limit_max,
             rate_limit_window_seconds=rate_limit_window,
             wc_max_retries=wc_max_retries,

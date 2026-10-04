@@ -24,16 +24,16 @@ import time
 from typing import Any, Dict
 
 # Ensure package directory is first in sys.path
-_root = os.path.dirname(os.path.abspath(__file__))
-_pkg = os.path.join(_root, "woocommerce_mcp")
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
 
-if _pkg in sys.path:
-    sys.path.remove(_pkg)
-sys.path.insert(0, _pkg)
+if current_dir in sys.path:
+    sys.path.remove(current_dir)
+sys.path.insert(0, current_dir)
 
-if _root in sys.path:
-    sys.path.remove(_root)
-sys.path.append(_root)
+if parent_dir in sys.path:
+    sys.path.remove(parent_dir)
+sys.path.append(parent_dir)
 
 try:
     from auth import Authenticator, b64url_decode, b64url_encode

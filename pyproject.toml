@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "woocommerce-mcp-server"
+version = "1.0.0"
+description = "Remote Model Context Protocol (MCP) server for WooCommerce stores"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+woocommerce-mcp = "woocommerce_mcp.__main__:main"
