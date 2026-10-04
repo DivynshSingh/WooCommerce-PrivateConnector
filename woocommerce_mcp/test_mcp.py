@@ -29,14 +29,12 @@ from typing import Any, Dict
 # Ensure package directory is first in sys.path
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
+pkg_dir = os.path.join(current_dir, "woocommerce_mcp")
 
-if current_dir in sys.path:
-    sys.path.remove(current_dir)
-sys.path.insert(0, current_dir)
-
-if parent_dir in sys.path:
-    sys.path.remove(parent_dir)
-sys.path.append(parent_dir)
+if pkg_dir not in sys.path:
+    sys.path.insert(0, pkg_dir)
+if current_dir not in sys.path:
+    sys.path.insert(0, current_dir)
 
 try:
     from auth import Authenticator, b64url_decode, b64url_encode, SHA256_DIGEST_INFO, verify_rs256

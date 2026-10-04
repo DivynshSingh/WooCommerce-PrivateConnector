@@ -2,7 +2,7 @@
 Cloudflare Workers Python Entrypoint for WooCommerce MCP Server.
 Implements non-blocking asynchronous WooCommerce REST client,
 manual environment variable injection, OAuth 2.1 RFC 9728 Protected Resource Metadata,
-and JavaScript runtime sequence header compatibility.
+RFC 7591 Dynamic Client Registration proxy, and JavaScript runtime sequence header compatibility.
 """
 
 import json
@@ -78,6 +78,7 @@ def inject_env_variables(env) -> None:
         "MCP_RATE_LIMIT_WINDOW_SECONDS",
         "AUTH0_M2M_CLIENT_ID",
         "AUTH0_M2M_CLIENT_SECRET",
+        "AUTH0_STATIC_CLIENT_ID",
         "WOOCOMMERCE_MAX_RETRIES",
         "WOOCOMMERCE_TIMEOUT_SECONDS",
     ]
@@ -140,6 +141,7 @@ def get_server_for_env(env) -> MCPServer:
         or get_var("AUTH0_CLIENT_SECRET", "")
         or get_var("AUTH0_MGMT_CLIENT_SECRET", "")
     )
+    auth0_static_client_id = get_var("AUTH0_STATIC_CLIENT_ID", "")
     oauth_issuer = (
         get_var("OAUTH_ISSUER", "").rstrip("/") or oauth_auth_server_url
     )
@@ -187,7 +189,6 @@ def get_server_for_env(env) -> MCPServer:
 
     # Re-use or instantiate server
     if _server_instance is not None:
-        # Check if credentials updated
         if (
             _server_instance.config.store_url == store_url
             and _server_instance.config.consumer_key == consumer_key
@@ -195,6 +196,7 @@ def get_server_for_env(env) -> MCPServer:
             and _server_instance.config.oauth_auth_server_url == oauth_auth_server_url
             and _server_instance.config.auth0_m2m_client_id == auth0_m2m_client_id
             and _server_instance.config.auth0_m2m_client_secret == auth0_m2m_client_secret
+            and _server_instance.config.auth0_static_client_id == auth0_static_client_id
         ):
             return _server_instance
 
@@ -216,6 +218,7 @@ def get_server_for_env(env) -> MCPServer:
         wc_timeout_seconds=wc_timeout,
         auth0_m2m_client_id=auth0_m2m_client_id,
         auth0_m2m_client_secret=auth0_m2m_client_secret,
+        auth0_static_client_id=auth0_static_client_id,
     )
     _server_instance = MCPServer(config)
     return _server_instance
@@ -346,7 +349,9 @@ async def on_fetch(request, env):
             )
 
         auth_servers = []
-        if server.config.oauth_auth_server_url:
+        if worker_origin:
+            auth_servers.append(worker_origin)
+        if server.config.oauth_auth_server_url and server.config.oauth_auth_server_url not in auth_servers:
             auth_servers.append(server.config.oauth_auth_server_url)
 
         protected_resource_metadata = {
@@ -368,7 +373,77 @@ async def on_fetch(request, env):
             headers=create_json_headers(),
         )
 
-    # 3b. RFC 7591 Dynamic Client Registration (DCR) Proxy Endpoint
+    # 3b. RFC 8414 OAuth Authorization Server Metadata & OpenID Configuration
+    # Intercepts discovery to force AI clients to register through the worker DCR proxy
+    if method == "GET" and norm_path in ("/.well-known/oauth-authorization-server", "/.well-known/openid-configuration"):
+        client_ip = extract_client_ip()
+        allowed, retry_after = server.unauth_rate_limiter.check_limit(client_ip)
+        if not allowed:
+            err_body = json.dumps({
+                "error": "too_many_requests",
+                "message": f"Rate limit exceeded. Retry after {retry_after} seconds.",
+            })
+            return Response.new(
+                err_body,
+                status=429,
+                headers=create_json_headers([["Retry-After", str(retry_after)]]),
+            )
+
+        auth_server_base = (server.config.oauth_auth_server_url or "").rstrip("/")
+        as_metadata = {
+            "issuer": server.config.oauth_issuer or f"{auth_server_base}/",
+            "authorization_endpoint": f"{worker_origin}/oauth/authorize",
+            "token_endpoint": f"{auth_server_base}/oauth/token",
+            "jwks_uri": server.config.oauth_jwks_url or f"{auth_server_base}/.well-known/jwks.json",
+            "registration_endpoint": f"{worker_origin}/oauth/register",
+            "scopes_supported": [
+                "mcp:read",
+                "mcp:write",
+                "offline_access",
+            ],
+            "response_types_supported": [
+                "code",
+            ],
+            "grant_types_supported": [
+                "authorization_code",
+                "refresh_token",
+            ],
+            "code_challenge_methods_supported": [
+                "S256",
+            ],
+            "token_endpoint_auth_methods_supported": [
+                "none",
+            ],
+        }
+        return Response.new(
+            json.dumps(as_metadata),
+            status=200,
+            headers=create_json_headers(),
+        )
+
+    # 3c. OAuth Authorization Proxy Endpoint (RFC 8707 Resource -> Audience Mapper)
+    # Claude MCP sends 'resource=https://...'. When Auth0's Resource Parameter Compatibility
+    # profile is off, Auth0 evaluates 'audience: null' and throws "Client is not authorized".
+    # This endpoint guarantees that 'audience' is injected matching 'resource' and redirects (302) to Auth0.
+    if method == "GET" and norm_path == "/oauth/authorize":
+        auth_server_base = (server.config.oauth_auth_server_url or "").rstrip("/")
+        query_str = parsed_url.query
+        params = urllib.parse.parse_qs(query_str, keep_blank_values=True)
+        flat_params = {k: v[0] if v else "" for k, v in params.items()}
+        target_audience = server.config.oauth_audience or worker_origin
+        if "resource" in flat_params and "audience" not in flat_params:
+            flat_params["audience"] = flat_params["resource"]
+        elif "audience" not in flat_params:
+            flat_params["audience"] = target_audience
+
+        upstream_auth_url = f"{auth_server_base}/authorize?{urllib.parse.urlencode(flat_params)}"
+        return Response.new(
+            "",
+            status=302,
+            headers=[["Location", upstream_auth_url]],
+        )
+
+    # 3d. RFC 7591 Dynamic Client Registration (DCR) Proxy Endpoint
     if method == "POST" and norm_path == "/oauth/register":
         # Unauthenticated / IP-based rate limiting on registration endpoint
         client_ip = extract_client_ip()
@@ -404,6 +479,7 @@ async def on_fetch(request, env):
             audience=server.config.oauth_audience,
             m2m_client_id=server.config.auth0_m2m_client_id,
             m2m_client_secret=server.config.auth0_m2m_client_secret,
+            static_client_id=server.config.auth0_static_client_id,
         )
         return Response.new(
             json.dumps(dcr_resp),
@@ -517,7 +593,7 @@ async def on_fetch(request, env):
             headers=create_json_headers(),
         )
 
-    # 10. Handle Batch vs Single JSON-RPC with async await
+    # 9. Handle Batch vs Single JSON-RPC with async await
     if isinstance(rpc_req, list):
         results = []
         for item in rpc_req:

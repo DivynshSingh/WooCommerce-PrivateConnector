@@ -226,6 +226,13 @@ async def create_client_grant(
 
     status, resp_text = await _async_http_post(grants_url, headers, grant_payload, timeout_seconds=timeout_seconds)
 
+    # If Auth0 rejects due to an unregistered scope (e.g. 'offline_access' not configured on custom API),
+    # retry automatically with only custom API scopes
+    if status == 400 and "offline_access" in grant_payload.get("scope", []):
+        logger.info("[Auth0 DCR] Retrying Client Grant without 'offline_access' scope...")
+        grant_payload["scope"] = [s for s in grant_payload["scope"] if s != "offline_access"]
+        status, resp_text = await _async_http_post(grants_url, headers, grant_payload, timeout_seconds=timeout_seconds)
+
     if status in (200, 201):
         logger.info("[Auth0 DCR] Client Grant created successfully for client_id='%s', audience='%s'", client_id, audience)
         return True, "Created"
@@ -244,12 +251,13 @@ async def handle_dcr_registration(
     audience: str = "https://woocommerce-mcp-server.woocommerce-connector.workers.dev",
     m2m_client_id: str = "",
     m2m_client_secret: str = "",
+    static_client_id: str = "",
     timeout_seconds: float = 10.0,
 ) -> Tuple[int, Dict[str, Any]]:
     """
     Handles RFC 7591 Dynamic Client Registration and automates Client Grant creation.
     1. Validates and sanitizes incoming client registration payload.
-    2. Registers or maps client with Auth0 upstream.
+    2. Uses static pre-registered Auth0 client or registers upstream with Auth0.
     3. Automates creation of an Auth0 Client Grant for audience and scopes.
     4. Returns a strictly compliant DCR response with 'response_types': ['code'].
 
@@ -268,11 +276,42 @@ async def handle_dcr_registration(
     redirect_uris = [str(u).strip() for u in payload.get("redirect_uris", [])]
     token_auth_method = str(payload.get("token_endpoint_auth_method") or "none").strip()
     app_type = str(payload.get("application_type") or "native").strip()
+    target_audience = audience or "https://woocommerce-mcp-server.woocommerce-connector.workers.dev"
+
+    # Option A: If a dedicated Auth0 client ID is provided, reuse it directly!
+    # This avoids Auth0's tenant application ceiling ('too_many_entities') and ensures
+    # the client is 100% recognized by Auth0's /authorize endpoint.
+    if static_client_id:
+        if auth_server_url and m2m_client_id and m2m_client_secret:
+            try:
+                await create_client_grant(
+                    client_id=static_client_id,
+                    audience=target_audience,
+                    auth_server_url=auth_server_url,
+                    m2m_client_id=m2m_client_id,
+                    m2m_client_secret=m2m_client_secret,
+                    scope=["mcp:read", "mcp:write", "offline_access"],
+                    timeout_seconds=timeout_seconds,
+                )
+            except Exception as grant_exc:
+                log_console_error(f"[Auth0 DCR] Exception during Client Grant automation: {grant_exc}")
+
+        return 201, {
+            "client_id": static_client_id,
+            "client_name": client_name,
+            "redirect_uris": redirect_uris,
+            "token_endpoint_auth_method": token_auth_method,
+            "response_types": ["code"],
+            "grant_types": ["authorization_code"],
+            "application_type": app_type,
+            "client_id_issued_at": int(time.time()),
+        }
 
     # Base upstream Auth0 DCR URL if configured
     auth0_dcr_url = f"{auth_server_url.rstrip('/')}/oidc/register" if auth_server_url else ""
-
     upstream_data: Optional[Dict[str, Any]] = None
+    status = 0
+    resp_text = ""
 
     # 2. Attempt upstream registration if Auth0 URL is provided
     if auth0_dcr_url:
@@ -299,25 +338,32 @@ async def handle_dcr_registration(
                     upstream_data = parsed
             except Exception:
                 pass
-        else:
-            logger.debug(
-                "Upstream Auth0 DCR returned %s. Falling back to managed client registration.",
-                status,
-            )
 
     # 3. Determine client_id
+    client_id: Optional[str] = None
+    client_secret: Optional[str] = None
     if upstream_data and "client_id" in upstream_data:
         client_id = str(upstream_data["client_id"])
         client_secret = upstream_data.get("client_secret")
+    elif "too_many_entities" in (resp_text or "") or status == 403:
+        fail_msg = (
+            "Auth0 tenant application limit reached ('too_many_entities'). "
+            "Delete unused dynamic applications ('tpc_...') in Auth0 Dashboard > Applications, "
+            "or configure AUTH0_STATIC_CLIENT_ID to reuse an existing application."
+        )
+        log_console_error(f"[Auth0 DCR] {fail_msg}")
+        return 403, {
+            "error": "too_many_entities",
+            "error_description": fail_msg,
+        }
     else:
-        # Generate clean, deterministic client_id for this client/redirect URI tuple
+        # Fallback for mock environments or offline tests
         seed = f"{client_name}:{redirect_uris[0]}:{auth_server_url}".encode("utf-8")
         hash_suffix = hashlib.sha256(seed).hexdigest()[:16]
         client_id = f"mcp-client-{hash_suffix}"
         client_secret = None
 
     # 4. Automate Client Grant creation via Management API
-    target_audience = audience or "https://woocommerce-mcp-server.woocommerce-connector.workers.dev"
     if auth_server_url:
         if m2m_client_id and m2m_client_secret:
             try:
@@ -340,8 +386,6 @@ async def handle_dcr_registration(
             )
 
     # 5. Formulate strictly-compliant RFC 7591 JSON response
-    # Explicitly includes 'response_types': ['code'] and 'grant_types': ['authorization_code']
-    # to prevent parser crashes in strict OAuth 2.1 client implementations (Claude Desktop)
     response_body = {
         "client_id": client_id,
         "client_name": client_name,
