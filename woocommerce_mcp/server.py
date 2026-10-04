@@ -195,7 +195,22 @@ class MCPHTTPHandler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed_url = urllib.parse.urlparse(self.path)
-        path = parsed_url.path
+        path = parsed_url.path.rstrip("/") if len(parsed_url.path) > 1 and parsed_url.path.endswith("/") else parsed_url.path
+
+        # RFC 9728 Protected Resource Metadata endpoint
+        if path == "/.well-known/oauth-protected-resource":
+            auth_servers = []
+            if self.server_instance.config.oauth_auth_server_url:
+                auth_servers.append(self.server_instance.config.oauth_auth_server_url)
+            self._send_json_response(200, {
+                "resource": self.server_instance.config.oauth_resource_server_url or "http://localhost:3000",
+                "authorization_servers": auth_servers,
+                "registration_endpoint": f"{self.server_instance.config.oauth_resource_server_url or 'http://localhost:3000'}/oauth/register",
+                "scopes_supported": ["mcp:read", "mcp:write"],
+                "bearer_methods_supported": ["header"],
+                "resource_documentation": "https://modelcontextprotocol.io",
+            })
+            return
 
         # Health / Status check (unauthenticated for load balancers and diagnostics)
         if path in ("/", "/health", "/status"):
@@ -208,7 +223,8 @@ class MCPHTTPHandler(http.server.BaseHTTPRequestHandler):
                 "auth_required": self.server_instance.authenticator.is_auth_required,
                 "endpoints": {
                     "mcp_rpc": "/mcp",
-                    "health": "/health"
+                    "health": "/health",
+                    "dcr_register": "/oauth/register",
                 }
             }
             self._send_json_response(200, status_data)
@@ -218,7 +234,27 @@ class MCPHTTPHandler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed_url = urllib.parse.urlparse(self.path)
-        path = parsed_url.path
+        path = parsed_url.path.rstrip("/") if len(parsed_url.path) > 1 and parsed_url.path.endswith("/") else parsed_url.path
+
+        # RFC 7591 Dynamic Client Registration proxy
+        if path == "/oauth/register":
+            try:
+                content_length = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(content_length).decode("utf-8")
+                payload = json.loads(body) if body else {}
+            except Exception:
+                self._send_json_response(400, {
+                    "error": "invalid_request",
+                    "error_description": "Request body must be valid JSON.",
+                })
+                return
+
+            from dcr import handle_dcr_registration
+            status_code, dcr_resp = asyncio.run(
+                handle_dcr_registration(payload, auth_server_url=self.server_instance.config.oauth_auth_server_url)
+            )
+            self._send_json_response(status_code, dcr_resp)
+            return
 
         if path not in ("/mcp", "/"):
             self._send_json_response(404, {"error": "Endpoint not found. Use /mcp for MCP requests."})

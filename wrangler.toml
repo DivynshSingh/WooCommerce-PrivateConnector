@@ -11,7 +11,7 @@ WOOCOMMERCE_STORE_URL = "https://dev-anythingstore37.pantheonsite.io"
 OAUTH_AUTH_SERVER_URL = "https://woocommerce-mcp-server.us.auth0.com"
 OAUTH_JWKS_URL = "https://woocommerce-mcp-server.us.auth0.com/.well-known/jwks.json"
 OAUTH_ISSUER = "https://woocommerce-mcp-server.us.auth0.com/"
-OAUTH_AUDIENCE = "https://woocommerce-mcp-server.workers.dev"
+OAUTH_AUDIENCE = "https://woocommerce-mcp-server.woocommerce-connector.workers.dev"
 OAUTH_JWKS_CACHE_TTL_SECONDS = "300"
 
 # Dual-Layer Rate Limiting Policy
@@ -29,3 +29,5 @@ WOOCOMMERCE_TIMEOUT_SECONDS = "15"
 # Sensitive secrets (configure via Cloudflare Dashboard or `npx wrangler secret put`):
 # - WOOCOMMERCE_CONSUMER_KEY
 # - WOOCOMMERCE_CONSUMER_SECRET
+# - AUTH0_M2M_CLIENT_ID
+# - AUTH0_M2M_CLIENT_SECRET

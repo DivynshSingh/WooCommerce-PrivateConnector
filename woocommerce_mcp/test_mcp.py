@@ -1,18 +1,19 @@
 """
-Comprehensive Verification Suite for WooCommerce MCP Server with Auth0 (DCR) & Dual-Layer Rate Limiting.
+Comprehensive Verification Suite for WooCommerce MCP Server with Auth0 (DCR Proxy) & Dual-Layer Rate Limiting.
 Tests:
 1. MCP Protocol Initialization & Ping
 2. Tool Discovery & Parameter Validation
 3. Async Tool Execution & Strict Pagination Enforcement (max 15 items per page)
 4. Initial Handshake (401 Challenge) with WWW-Authenticate Header pointing to metadata URL
-5. RFC 9728 Protected Resource Metadata pointing to Auth0 Authorization Server
-6. IP-Based Rate Limiting on GET /.well-known/oauth-protected-resource & Unauthenticated Handshakes
-7. RS256 Stateless JWT Verification matching Auth0-Style JWKS & In-Memory Caching
-8. Expired & Tampered Token Rejection
-9. Authenticated Client Rate Limiting (Keyed by Token Subject Identifier)
-10. Environment Variable Injection into os.environ
-11. WooCommerce API Authentication Failure & Consumer Secret Sanitization
-12. Transient Error Classification & Non-Blocking Async Retries
+5. RFC 9728 Protected Resource Metadata with registration_endpoint pointing to DCR Proxy
+6. RFC 7591 Dynamic Client Registration (DCR) Proxy (POST /oauth/register) & IP Rate Limiting
+7. IP-Based Rate Limiting on Discovery Endpoint & Unauthenticated Handshakes
+8. RS256 Stateless JWT Verification matching Auth0-Style JWKS & In-Memory Caching
+9. Expired & Tampered Token Rejection
+10. Authenticated Client Rate Limiting (Keyed by Token Subject Identifier)
+11. Environment Variable Injection into os.environ
+12. WooCommerce API Authentication Failure & Consumer Secret Sanitization
+13. Transient Error Classification & Non-Blocking Async Retries
 """
 
 import asyncio
@@ -40,19 +41,21 @@ sys.path.append(parent_dir)
 try:
     from auth import Authenticator, b64url_decode, b64url_encode, SHA256_DIGEST_INFO, verify_rs256
     from config import ServerConfig
+    from dcr import handle_dcr_registration, validate_dcr_payload, create_client_grant, get_auth0_management_token
     from rate_limiter import RateLimiter
     from server import MCPServer
     from tools import execute_tool, get_tool_definitions, validate_input
     from wc_client import WooCommerceAPIError, WooCommerceClient
-    from worker import on_fetch, inject_env_variables
+    from worker import on_fetch, inject_env_variables, app
 except ImportError:
     from woocommerce_mcp.auth import Authenticator, b64url_decode, b64url_encode, SHA256_DIGEST_INFO, verify_rs256
     from woocommerce_mcp.config import ServerConfig
+    from woocommerce_mcp.dcr import handle_dcr_registration, validate_dcr_payload, create_client_grant, get_auth0_management_token
     from woocommerce_mcp.rate_limiter import RateLimiter
     from woocommerce_mcp.server import MCPServer
     from woocommerce_mcp.tools import execute_tool, get_tool_definitions, validate_input
     from woocommerce_mcp.wc_client import WooCommerceAPIError, WooCommerceClient
-    from woocommerce_mcp.worker import on_fetch, inject_env_variables
+    from woocommerce_mcp.worker import on_fetch, inject_env_variables, app
 
 GREEN = "\033[92m"
 RED = "\033[91m"
@@ -152,12 +155,12 @@ def create_test_rs256_jwt(claims: Dict[str, Any], kid: str = "auth0-key-1") -> s
 
 async def run_all_tests():
     print(f"\n{YELLOW}{'='*70}")
-    print("  WooCommerce MCP Server - Auth0 (DCR) & Dual-Layer Rate Limiting Suite  ")
+    print("  WooCommerce MCP Server - Auth0 (DCR Proxy) & Rate Limiting Suite       ")
     print(f"{'='*70}{RESET}")
 
     auth0_domain = "https://woocommerce-mcp-server.us.auth0.com"
     auth0_issuer = f"{auth0_domain}/"
-    auth0_audience = "https://woocommerce-mcp-server.workers.dev"
+    auth0_audience = "https://woocommerce-mcp-server.woocommerce-connector.workers.dev"
 
     auth0_jwk = {
         "kty": "RSA",
@@ -306,9 +309,9 @@ async def run_all_tests():
     )
 
     # -------------------------------------------------------------------------
-    # TEST 5: Protected Resource Metadata (RFC 9728) with Auth0
+    # TEST 5: Protected Resource Metadata (RFC 9728) with registration_endpoint
     # -------------------------------------------------------------------------
-    print_test_header(5, "Protected Resource Metadata (RFC 9728) pointing to Auth0 DCR")
+    print_test_header(5, "Protected Resource Metadata (RFC 9728) pointing to DCR Proxy")
     metadata_req = MockRequest(
         method="GET",
         url="https://my-store-mcp.workers.dev/.well-known/oauth-protected-resource",
@@ -326,6 +329,10 @@ async def run_all_tests():
         f"Authorization server correctly set to Auth0 domain ({auth0_domain})",
     )
     assert_test(
+        meta_json.get("registration_endpoint") == "https://my-store-mcp.workers.dev/oauth/register",
+        "registration_endpoint correctly points to Cloudflare Worker DCR proxy route",
+    )
+    assert_test(
         "mcp:read" in meta_json.get("scopes_supported", []) and "mcp:write" in meta_json.get("scopes_supported", []),
         "Supported scopes include 'mcp:read' and 'mcp:write'",
     )
@@ -335,9 +342,208 @@ async def run_all_tests():
     )
 
     # -------------------------------------------------------------------------
-    # TEST 6: IP-Based Rate Limiting on Discovery Endpoint & Handshakes
+    # TEST 6: RFC 7591 Dynamic Client Registration (DCR) Proxy
     # -------------------------------------------------------------------------
-    print_test_header(6, "IP-Based Rate Limiting on Discovery Endpoint")
+    print_test_header(6, "DCR Proxy Route (POST /oauth/register) & Parser Compliance")
+    dcr_valid_payload = {
+        "client_name": "Claude Desktop Client",
+        "redirect_uris": ["http://localhost:5173/callback", "https://claude.ai/oauth/callback"],
+        "token_endpoint_auth_method": "none",
+        "application_type": "native",
+    }
+    dcr_req = MockRequest(
+        method="POST",
+        url="https://my-store-mcp.workers.dev/oauth/register",
+        headers={"cf-connecting-ip": "198.51.100.10", "content-type": "application/json"},
+        body=json.dumps(dcr_valid_payload),
+    )
+    dcr_res = await on_fetch(dcr_req, env)
+    assert_test(dcr_res.status == 201, "POST /oauth/register returns 201 Created")
+    dcr_json = json.loads(dcr_res.body)
+
+    assert_test(bool(dcr_json.get("client_id")), f"Contains valid client_id: {dcr_json.get('client_id')}")
+    assert_test(
+        dcr_json.get("redirect_uris") == dcr_valid_payload["redirect_uris"],
+        "Contains exact requested redirect_uris",
+    )
+    assert_test(
+        dcr_json.get("token_endpoint_auth_method") == "none",
+        "Contains 'token_endpoint_auth_method': 'none'",
+    )
+    assert_test(
+        dcr_json.get("response_types") == ["code"],
+        "CRITICAL: Contains 'response_types': ['code'] to prevent Claude parser crashes",
+    )
+    assert_test(
+        dcr_json.get("grant_types") == ["authorization_code"],
+        "CRITICAL: Contains 'grant_types': ['authorization_code']",
+    )
+
+    # Verify FastAPI redirect_slashes is explicitly False
+    assert_test(
+        getattr(app, "redirect_slashes", True) is False,
+        "FastAPI app initialized with redirect_slashes=False",
+    )
+
+    # Test trailing slash tolerance: POST /oauth/register/ (with trailing slash)
+    # Must return 201 Created directly, without 307 Temporary Redirect (which strips body)
+    dcr_slash_req = MockRequest(
+        method="POST",
+        url="https://my-store-mcp.workers.dev/oauth/register/",
+        headers={"cf-connecting-ip": "198.51.100.13", "content-type": "application/json"},
+        body=json.dumps(dcr_valid_payload),
+    )
+    dcr_slash_res = await on_fetch(dcr_slash_req, env)
+    assert_test(
+        dcr_slash_res.status == 201,
+        "POST /oauth/register/ (with trailing slash) returns 201 directly without 307 redirect",
+    )
+    slash_json = json.loads(dcr_slash_res.body)
+    assert_test(
+        slash_json.get("client_id") is not None,
+        "Trailing slash POST retains request body and produces valid client_id",
+    )
+
+    # Test DCR invalid payload rejection (missing redirect_uris)
+    dcr_bad_req = MockRequest(
+        method="POST",
+        url="https://my-store-mcp.workers.dev/oauth/register",
+        headers={"cf-connecting-ip": "198.51.100.11", "content-type": "application/json"},
+        body=json.dumps({"client_name": "Incomplete Client"}),
+    )
+    dcr_bad_res = await on_fetch(dcr_bad_req, env)
+    assert_test(dcr_bad_res.status == 400, "Rejects registration missing redirect_uris with 400 Bad Request")
+    bad_json = json.loads(dcr_bad_res.body)
+    assert_test(bad_json.get("error") == "invalid_client_metadata", "Returns standard error 'invalid_client_metadata'")
+
+    # Test DCR malformed JSON body
+    dcr_malformed_req = MockRequest(
+        method="POST",
+        url="https://my-store-mcp.workers.dev/oauth/register",
+        headers={"cf-connecting-ip": "198.51.100.12", "content-type": "application/json"},
+        body="{bad-json",
+    )
+    dcr_malformed_res = await on_fetch(dcr_malformed_req, env)
+    assert_test(dcr_malformed_res.status == 400, "Rejects malformed JSON body with 400 Bad Request")
+
+    # -------------------------------------------------------------------------
+    # Test Automated Client Grant Creation via Auth0 Management API
+    # -------------------------------------------------------------------------
+    from unittest.mock import patch
+    posted_grant_payload = {}
+    posted_grant_headers = {}
+    posted_token_payload = {}
+
+    async def mock_mgmt_http_post(url, headers, payload, timeout_seconds=10.0):
+        if url.endswith("/oauth/token"):
+            posted_token_payload.update(payload)
+            return 200, json.dumps({
+                "access_token": "mock_mgmt_api_token_abc123",
+                "expires_in": 86400,
+                "token_type": "Bearer",
+            })
+        elif url.endswith("/api/v2/client-grants"):
+            posted_grant_payload.update(payload)
+            posted_grant_headers.update(headers)
+            return 201, json.dumps({
+                "id": "cgr_test_12345",
+                "client_id": payload.get("client_id"),
+                "audience": payload.get("audience"),
+                "scope": payload.get("scope"),
+            })
+        return 404, "Not Found"
+
+    with patch("dcr._async_http_post", side_effect=mock_mgmt_http_post):
+        # 1. Verify Management API token retrieval
+        token = await get_auth0_management_token(
+            auth0_domain,
+            m2m_client_id="m2m_test_client_id",
+            m2m_client_secret="m2m_test_client_secret",
+        )
+        assert_test(token == "mock_mgmt_api_token_abc123", "Management API token successfully retrieved")
+        assert_test(
+            posted_token_payload.get("audience") == f"{auth0_domain}/api/v2/",
+            f"Management token requested for audience {auth0_domain}/api/v2/",
+        )
+
+        # 2. Verify Client Grant creation with audience and scopes
+        grant_ok, grant_msg = await create_client_grant(
+            client_id="newly_created_client_777",
+            audience=auth0_audience,
+            auth_server_url=auth0_domain,
+            m2m_client_id="m2m_test_client_id",
+            m2m_client_secret="m2m_test_client_secret",
+            scope=["mcp:read", "mcp:write", "offline_access"],
+        )
+        assert_test(grant_ok is True, "Client Grant successfully created via Auth0 Management API")
+        assert_test(
+            posted_grant_payload.get("client_id") == "newly_created_client_777",
+            "Client Grant has correct client_id ('newly_created_client_777')",
+        )
+        assert_test(
+            posted_grant_payload.get("audience") == auth0_audience,
+            f"Client Grant has correct audience ('{auth0_audience}')",
+        )
+        assert_test(
+            posted_grant_payload.get("scope") == ["mcp:read", "mcp:write", "offline_access"],
+            "Client Grant has correct scopes ['mcp:read', 'mcp:write', 'offline_access']",
+        )
+        assert_test(
+            posted_grant_headers.get("Authorization") == "Bearer mock_mgmt_api_token_abc123",
+            "Client Grant request includes Bearer Management API token",
+        )
+
+        # 3. Verify Client Grant HTTP 409 Conflict handled gracefully (already granted)
+        async def mock_conflict_http_post(url, headers, payload, timeout_seconds=10.0):
+            if url.endswith("/oauth/token"):
+                return 200, json.dumps({"access_token": "mock_token", "expires_in": 3600})
+            elif url.endswith("/api/v2/client-grants"):
+                return 409, json.dumps({"error": "Conflict", "message": "A client grant for this client and audience already exists"})
+            return 404, "Not Found"
+
+        with patch("dcr._async_http_post", side_effect=mock_conflict_http_post):
+            grant_conflict_ok, _ = await create_client_grant(
+                client_id="existing_client_888",
+                audience=auth0_audience,
+                auth_server_url=auth0_domain,
+                m2m_client_id="m2m_test_client_id",
+                m2m_client_secret="m2m_test_client_secret",
+            )
+            assert_test(grant_conflict_ok is True, "Client Grant HTTP 409 Conflict handled gracefully as already granted")
+
+        # 4. Verify full DCR registration with M2M credentials returns 201 Created and response_types: ["code"]
+        env_with_m2m = MockEnv(
+            WOOCOMMERCE_STORE_URL="https://dev-anythingstore37.pantheonsite.io",
+            WOOCOMMERCE_CONSUMER_KEY="ck_test",
+            WOOCOMMERCE_CONSUMER_SECRET="cs_test",
+            OAUTH_AUTH_SERVER_URL=auth0_domain,
+            OAUTH_JWKS_URL=f"{auth0_domain}/.well-known/jwks.json",
+            OAUTH_ISSUER=auth0_issuer,
+            OAUTH_AUDIENCE=auth0_audience,
+            AUTH0_M2M_CLIENT_ID="m2m_test_client_id",
+            AUTH0_M2M_CLIENT_SECRET="m2m_test_client_secret",
+        )
+        dcr_m2m_req = MockRequest(
+            method="POST",
+            url="https://my-store-mcp.workers.dev/oauth/register",
+            headers={"cf-connecting-ip": "198.51.100.20", "content-type": "application/json"},
+            body=json.dumps({
+                "client_name": "Claude Desktop Automated Grant",
+                "redirect_uris": ["http://localhost:5173/callback"],
+            }),
+        )
+        dcr_m2m_res = await on_fetch(dcr_m2m_req, env_with_m2m)
+        assert_test(dcr_m2m_res.status == 201, "DCR registration with automated Client Grant returns 201 Created")
+        dcr_m2m_json = json.loads(dcr_m2m_res.body)
+        assert_test(
+            dcr_m2m_json.get("response_types") == ["code"],
+            "Response strictly contains 'response_types': ['code']",
+        )
+
+    # -------------------------------------------------------------------------
+    # TEST 7: IP-Based Rate Limiting on Discovery Endpoint & DCR
+    # -------------------------------------------------------------------------
+    print_test_header(7, "IP-Based Rate Limiting on Discovery & Registration")
     worker_server = MCPServer(config)
     worker_server.unauth_rate_limiter = RateLimiter(max_requests=5, window_seconds=1)
     spammer_ip = "203.0.113.99"
@@ -351,9 +557,9 @@ async def run_all_tests():
     assert_test(retry_after > 0, f"Returns valid retry-after window ({retry_after}s)")
 
     # -------------------------------------------------------------------------
-    # TEST 7: Stateless RS256 JWT Verification matching Auth0 JWKS
+    # TEST 8: Stateless RS256 JWT Verification matching Auth0 JWKS
     # -------------------------------------------------------------------------
-    print_test_header(7, "Stateless RS256 JWT Verification (Auth0-Style Payload)")
+    print_test_header(8, "Stateless RS256 JWT Verification (Auth0-Style Payload)")
     auth = Authenticator(
         jwks_url=f"{auth0_domain}/.well-known/jwks.json",
         expected_issuer=auth0_issuer,
@@ -385,9 +591,9 @@ async def run_all_tests():
     )
 
     # -------------------------------------------------------------------------
-    # TEST 8: Expired & Tampered Token Rejection
+    # TEST 9: Expired & Tampered Token Rejection
     # -------------------------------------------------------------------------
-    print_test_header(8, "Expired & Tampered RS256 Token Rejection")
+    print_test_header(9, "Expired & Tampered RS256 Token Rejection")
     expired_claims = dict(auth0_claims)
     expired_claims["exp"] = time.time() - 300
     expired_jwt = create_test_rs256_jwt(expired_claims, kid="auth0-key-1")
@@ -406,9 +612,9 @@ async def run_all_tests():
     assert_test("signature" in err_tamp.lower(), f"Returns signature error message: {err_tamp}")
 
     # -------------------------------------------------------------------------
-    # TEST 9: Authenticated Client Rate Limiting (Keyed by Token Subject)
+    # TEST 10: Authenticated Client Rate Limiting (Keyed by Token Subject)
     # -------------------------------------------------------------------------
-    print_test_header(9, "Authenticated Client Rate Limiting (Keyed by Subject)")
+    print_test_header(10, "Authenticated Client Rate Limiting (Keyed by Subject)")
     auth_limiter = RateLimiter(max_requests=5, window_seconds=1)
     test_subject_client_id = client_id
 
@@ -421,9 +627,9 @@ async def run_all_tests():
     assert_test(retry_after > 0, f"Returns valid retry_after window ({retry_after}s)")
 
     # -------------------------------------------------------------------------
-    # TEST 10: Environment Variable Injection into os.environ
+    # TEST 11: Environment Variable Injection into os.environ
     # -------------------------------------------------------------------------
-    print_test_header(10, "Environment Variable Injection into os.environ")
+    print_test_header(11, "Environment Variable Injection into os.environ")
     test_env = MockEnv(
         WOOCOMMERCE_STORE_URL="https://dev-anythingstore37.pantheonsite.io",
         WOOCOMMERCE_CONSUMER_KEY="ck_injected_123",
@@ -445,9 +651,9 @@ async def run_all_tests():
     )
 
     # -------------------------------------------------------------------------
-    # TEST 11: WooCommerce Authentication Failure & Secret Sanitization
+    # TEST 12: WooCommerce Authentication Failure & Secret Sanitization
     # -------------------------------------------------------------------------
-    print_test_header(11, "WooCommerce Authentication Failure Handling & Sanitization")
+    print_test_header(12, "WooCommerce Authentication Failure Handling & Sanitization")
     class AuthFailingWCClient(WooCommerceClient):
         async def _execute_with_retry(self, endpoint, method="GET", params=None, data=None):
             raise WooCommerceAPIError(
@@ -477,9 +683,9 @@ async def run_all_tests():
     assert_test("invalid_secret_do_not_leak" not in err_text, "Consumer secret is NOT leaked in error output")
 
     # -------------------------------------------------------------------------
-    # TEST 12: Transient Retry Classification & Rate Limiting
+    # TEST 13: Transient Retry Classification & Rate Limiting
     # -------------------------------------------------------------------------
-    print_test_header(12, "Transient Retry Classification")
+    print_test_header(13, "Transient Retry Classification")
     wc_client = WooCommerceClient(
         store_url="https://mock.example.com",
         consumer_key="ck_123",
@@ -492,7 +698,7 @@ async def run_all_tests():
         assert_test(not wc_client.is_transient_error(code), f"HTTP {code} is classified as permanent")
 
     print(f"\n{GREEN}{'='*70}")
-    print("   ALL 12 AUTH0 & DUAL-LAYER RATE LIMITING TESTS PASSED!          ")
+    print("   ALL 13 DCR PROXY & DUAL-LAYER RATE LIMITING TESTS PASSED!     ")
     print(f"{'='*70}{RESET}\n")
 
 

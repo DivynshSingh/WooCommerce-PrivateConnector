@@ -40,6 +40,8 @@ class ServerConfig:
     unauth_rate_limit_window_seconds: int = 60
     wc_max_retries: int = 3
     wc_timeout_seconds: float = 15.0
+    auth0_m2m_client_id: str = ""
+    auth0_m2m_client_secret: str = ""
 
     @property
     def has_woocommerce_credentials(self) -> bool:
@@ -65,7 +67,7 @@ class ServerConfig:
         )
         oauth_audience = (
             os.environ.get("OAUTH_AUDIENCE", "").strip()
-            or "https://woocommerce-mcp-server.workers.dev"
+            or "https://woocommerce-mcp-server.woocommerce-connector.workers.dev"
         )
         oauth_issuer = (
             os.environ.get("OAUTH_ISSUER", "").strip().rstrip("/")
@@ -76,6 +78,17 @@ class ServerConfig:
         oauth_resource_url = (
             os.environ.get("OAUTH_RESOURCE_SERVER_URL", "").strip().rstrip("/")
             or os.environ.get("RESOURCE_SERVER_URL", "").strip().rstrip("/")
+        )
+
+        auth0_m2m_client_id = (
+            os.environ.get("AUTH0_M2M_CLIENT_ID", "").strip()
+            or os.environ.get("AUTH0_CLIENT_ID", "").strip()
+            or os.environ.get("AUTH0_MGMT_CLIENT_ID", "").strip()
+        )
+        auth0_m2m_client_secret = (
+            os.environ.get("AUTH0_M2M_CLIENT_SECRET", "").strip()
+            or os.environ.get("AUTH0_CLIENT_SECRET", "").strip()
+            or os.environ.get("AUTH0_MGMT_CLIENT_SECRET", "").strip()
         )
 
         try:
@@ -129,4 +142,6 @@ class ServerConfig:
             unauth_rate_limit_window_seconds=unauth_rate_limit_window,
             wc_max_retries=wc_max_retries,
             wc_timeout_seconds=wc_timeout,
+            auth0_m2m_client_id=auth0_m2m_client_id,
+            auth0_m2m_client_secret=auth0_m2m_client_secret,
         )

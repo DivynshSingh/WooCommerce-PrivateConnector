@@ -2,7 +2,7 @@
 Cloudflare Workers Python Entrypoint for WooCommerce MCP Server.
 Implements non-blocking asynchronous WooCommerce REST client,
 manual environment variable injection, OAuth 2.1 RFC 9728 Protected Resource Metadata,
-and JavaScript runtime sequence header compatibility.
+RFC 7591 Dynamic Client Registration proxy, and JavaScript runtime sequence header compatibility.
 """
 
 import json
@@ -20,9 +20,38 @@ if os.path.isdir(pkg_dir) and pkg_dir not in sys.path:
 try:
     from config import ServerConfig
     from server import MCPServer
+    from dcr import handle_dcr_registration
 except ImportError:
     from woocommerce_mcp.config import ServerConfig
     from woocommerce_mcp.server import MCPServer
+    from woocommerce_mcp.dcr import handle_dcr_registration
+
+try:
+    from fastapi import FastAPI
+    app = FastAPI(redirect_slashes=False)
+except ImportError:
+    class FastAPI:
+        """FastAPI-compatible stub ensuring redirect_slashes=False is set and accessible."""
+        def __init__(self, *args, redirect_slashes: bool = False, **kwargs):
+            self.redirect_slashes = redirect_slashes
+            self.routes = []
+
+        def get(self, *args, **kwargs):
+            def decorator(fn):
+                return fn
+            return decorator
+
+        def post(self, *args, **kwargs):
+            def decorator(fn):
+                return fn
+            return decorator
+
+        def options(self, *args, **kwargs):
+            def decorator(fn):
+                return fn
+            return decorator
+
+    app = FastAPI(redirect_slashes=False)
 
 _server_instance = None
 
@@ -47,8 +76,8 @@ def inject_env_variables(env) -> None:
         "OAUTH_JWKS_CACHE_TTL_SECONDS",
         "MCP_RATE_LIMIT_MAX_REQUESTS",
         "MCP_RATE_LIMIT_WINDOW_SECONDS",
-        "UNAUTH_RATE_LIMIT_MAX_REQUESTS",
-        "UNAUTH_RATE_LIMIT_WINDOW_SECONDS",
+        "AUTH0_M2M_CLIENT_ID",
+        "AUTH0_M2M_CLIENT_SECRET",
         "WOOCOMMERCE_MAX_RETRIES",
         "WOOCOMMERCE_TIMEOUT_SECONDS",
     ]
@@ -99,7 +128,17 @@ def get_server_for_env(env) -> MCPServer:
     )
     oauth_audience = (
         get_var("OAUTH_AUDIENCE", "")
-        or "https://woocommerce-mcp-server.workers.dev"
+        or "https://woocommerce-mcp-server.woocommerce-connector.workers.dev"
+    )
+    auth0_m2m_client_id = (
+        get_var("AUTH0_M2M_CLIENT_ID", "")
+        or get_var("AUTH0_CLIENT_ID", "")
+        or get_var("AUTH0_MGMT_CLIENT_ID", "")
+    )
+    auth0_m2m_client_secret = (
+        get_var("AUTH0_M2M_CLIENT_SECRET", "")
+        or get_var("AUTH0_CLIENT_SECRET", "")
+        or get_var("AUTH0_MGMT_CLIENT_SECRET", "")
     )
     oauth_issuer = (
         get_var("OAUTH_ISSUER", "").rstrip("/") or oauth_auth_server_url
@@ -153,6 +192,8 @@ def get_server_for_env(env) -> MCPServer:
             and _server_instance.config.consumer_key == consumer_key
             and _server_instance.config.consumer_secret == consumer_secret
             and _server_instance.config.oauth_auth_server_url == oauth_auth_server_url
+            and _server_instance.config.auth0_m2m_client_id == auth0_m2m_client_id
+            and _server_instance.config.auth0_m2m_client_secret == auth0_m2m_client_secret
         ):
             return _server_instance
 
@@ -172,6 +213,8 @@ def get_server_for_env(env) -> MCPServer:
         unauth_rate_limit_window_seconds=unauth_rate_limit_window,
         wc_max_retries=wc_max_retries,
         wc_timeout_seconds=wc_timeout,
+        auth0_m2m_client_id=auth0_m2m_client_id,
+        auth0_m2m_client_secret=auth0_m2m_client_secret,
     )
     _server_instance = MCPServer(config)
     return _server_instance
@@ -209,6 +252,9 @@ async def on_fetch(request, env):
 
     path = "/" + url_str.split("/", 3)[-1].split("?")[0] if "/" in url_str else "/"
     query_str = url_str.split("?", 1)[1] if "?" in url_str else ""
+
+    # Normalize trailing slash directly without 307 Temporary Redirects (preserves POST body)
+    norm_path = path.rstrip("/") if len(path) > 1 and path.endswith("/") else path
 
     server = get_server_for_env(env)
     configured_resource_url = server.config.oauth_resource_server_url
@@ -283,7 +329,7 @@ async def on_fetch(request, env):
         return str(ip).strip() if ip else "127.0.0.1"
 
     # 3. RFC 9728 Protected Resource Metadata endpoint
-    if method == "GET" and path == "/.well-known/oauth-protected-resource":
+    if method == "GET" and norm_path == "/.well-known/oauth-protected-resource":
         # Unauthenticated / IP-based rate limiting on discovery endpoint
         client_ip = extract_client_ip()
         allowed, retry_after = server.unauth_rate_limiter.check_limit(client_ip)
@@ -305,6 +351,7 @@ async def on_fetch(request, env):
         protected_resource_metadata = {
             "resource": worker_origin,
             "authorization_servers": auth_servers,
+            "registration_endpoint": f"{worker_origin}/oauth/register",
             "scopes_supported": [
                 "mcp:read",
                 "mcp:write",
@@ -320,8 +367,51 @@ async def on_fetch(request, env):
             headers=create_json_headers(),
         )
 
+    # 3b. RFC 7591 Dynamic Client Registration (DCR) Proxy Endpoint
+    if method == "POST" and norm_path == "/oauth/register":
+        # Unauthenticated / IP-based rate limiting on registration endpoint
+        client_ip = extract_client_ip()
+        allowed, retry_after = server.unauth_rate_limiter.check_limit(client_ip)
+        if not allowed:
+            err_body = json.dumps({
+                "error": "too_many_requests",
+                "message": f"Rate limit exceeded for client registration. Retry after {retry_after} seconds.",
+            })
+            return Response.new(
+                err_body,
+                status=429,
+                headers=create_json_headers([["Retry-After", str(retry_after)]]),
+            )
+
+        try:
+            body_text = await request.text()
+            payload = json.loads(body_text) if body_text else {}
+        except Exception:
+            err_body = json.dumps({
+                "error": "invalid_request",
+                "error_description": "Request body must be valid JSON.",
+            })
+            return Response.new(
+                err_body,
+                status=400,
+                headers=create_json_headers(),
+            )
+
+        status_code, dcr_resp = await handle_dcr_registration(
+            payload,
+            auth_server_url=server.config.oauth_auth_server_url,
+            audience=server.config.oauth_audience,
+            m2m_client_id=server.config.auth0_m2m_client_id,
+            m2m_client_secret=server.config.auth0_m2m_client_secret,
+        )
+        return Response.new(
+            json.dumps(dcr_resp),
+            status=status_code,
+            headers=create_json_headers(),
+        )
+
     # 4. Health and status route
-    if method == "GET" and path in ("/", "/health", "/status"):
+    if method == "GET" and norm_path in ("/", "/health", "/status"):
         body = json.dumps({
             "status": "healthy",
             "service": "WooCommerce MCP Server (Async Cloudflare Worker)",
@@ -340,7 +430,7 @@ async def on_fetch(request, env):
         )
 
     # 5. MCP Route check
-    if method != "POST" or path not in ("/mcp", "/"):
+    if method != "POST" or norm_path not in ("/mcp", "/"):
         body = json.dumps({"error": "Not Found. Send MCP POST requests to /mcp"})
         return Response.new(
             body,
