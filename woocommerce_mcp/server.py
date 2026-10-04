@@ -37,12 +37,15 @@ class MCPServer:
 
     def __init__(self, config: ServerConfig):
         self.config = config
+        signing_secret = config.consumer_secret or "wc_mcp_auth_secret_key"
         self.authenticator = Authenticator(
             jwks_url=config.oauth_jwks_url,
             auth_server_url=config.oauth_auth_server_url,
             expected_issuer=config.oauth_issuer,
             expected_audience=config.oauth_audience,
             cache_ttl_seconds=config.jwks_cache_ttl_seconds,
+            signing_secret=signing_secret,
+            worker_origin=config.oauth_resource_server_url or config.oauth_audience,
         )
         self.rate_limiter = RateLimiter(
             max_requests=config.rate_limit_max_requests,

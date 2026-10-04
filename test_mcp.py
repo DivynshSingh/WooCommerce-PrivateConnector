@@ -349,58 +349,73 @@ async def run_all_tests():
         "token_endpoint_auth_method": "none",
         "application_type": "native",
     }
-    dcr_req = MockRequest(
-        method="POST",
-        url="https://my-store-mcp.workers.dev/oauth/register",
-        headers={"cf-connecting-ip": "198.51.100.10", "content-type": "application/json"},
-        body=json.dumps(dcr_valid_payload),
-    )
-    dcr_res = await on_fetch(dcr_req, env)
-    assert_test(dcr_res.status == 201, "POST /oauth/register returns 201 Created")
-    dcr_json = json.loads(dcr_res.body)
+    from unittest.mock import patch
 
-    assert_test(bool(dcr_json.get("client_id")), f"Contains valid client_id: {dcr_json.get('client_id')}")
-    assert_test(
-        dcr_json.get("redirect_uris") == dcr_valid_payload["redirect_uris"],
-        "Contains exact requested redirect_uris",
-    )
-    assert_test(
-        dcr_json.get("token_endpoint_auth_method") == "none",
-        "Contains 'token_endpoint_auth_method': 'none'",
-    )
-    assert_test(
-        dcr_json.get("response_types") == ["code"],
-        "CRITICAL: Contains 'response_types': ['code'] to prevent Claude parser crashes",
-    )
-    assert_test(
-        dcr_json.get("grant_types") == ["authorization_code"],
-        "CRITICAL: Contains 'grant_types': ['authorization_code']",
-    )
+    async def mock_upstream_dcr_post(url, headers, payload, timeout_seconds=10.0):
+        if url.endswith("/oidc/register"):
+            return 201, json.dumps({
+                "client_id": "tpc_auth0_upstream_verified_999",
+                "client_name": payload.get("client_name"),
+                "redirect_uris": payload.get("redirect_uris"),
+                "token_endpoint_auth_method": payload.get("token_endpoint_auth_method", "none"),
+                "response_types": ["code"],
+                "grant_types": ["authorization_code"],
+            })
+        return 404, "Not Found"
 
-    # Verify FastAPI redirect_slashes is explicitly False
-    assert_test(
-        getattr(app, "redirect_slashes", True) is False,
-        "FastAPI app initialized with redirect_slashes=False",
-    )
+    with patch("dcr._async_http_post", side_effect=mock_upstream_dcr_post):
+        dcr_req = MockRequest(
+            method="POST",
+            url="https://my-store-mcp.workers.dev/oauth/register",
+            headers={"cf-connecting-ip": "198.51.100.10", "content-type": "application/json"},
+            body=json.dumps(dcr_valid_payload),
+        )
+        dcr_res = await on_fetch(dcr_req, env)
+        assert_test(dcr_res.status == 201, "POST /oauth/register returns 201 Created")
+        dcr_json = json.loads(dcr_res.body)
 
-    # Test trailing slash tolerance: POST /oauth/register/ (with trailing slash)
-    # Must return 201 Created directly, without 307 Temporary Redirect (which strips body)
-    dcr_slash_req = MockRequest(
-        method="POST",
-        url="https://my-store-mcp.workers.dev/oauth/register/",
-        headers={"cf-connecting-ip": "198.51.100.13", "content-type": "application/json"},
-        body=json.dumps(dcr_valid_payload),
-    )
-    dcr_slash_res = await on_fetch(dcr_slash_req, env)
-    assert_test(
-        dcr_slash_res.status == 201,
-        "POST /oauth/register/ (with trailing slash) returns 201 directly without 307 redirect",
-    )
-    slash_json = json.loads(dcr_slash_res.body)
-    assert_test(
-        slash_json.get("client_id") is not None,
-        "Trailing slash POST retains request body and produces valid client_id",
-    )
+        assert_test(bool(dcr_json.get("client_id")), f"Contains valid client_id: {dcr_json.get('client_id')}")
+        assert_test(
+            dcr_json.get("redirect_uris") == dcr_valid_payload["redirect_uris"],
+            "Contains exact requested redirect_uris",
+        )
+        assert_test(
+            dcr_json.get("token_endpoint_auth_method") == "none",
+            "Contains 'token_endpoint_auth_method': 'none'",
+        )
+        assert_test(
+            dcr_json.get("response_types") == ["code"],
+            "CRITICAL: Contains 'response_types': ['code'] to prevent Claude parser crashes",
+        )
+        assert_test(
+            dcr_json.get("grant_types") == ["authorization_code"],
+            "CRITICAL: Contains 'grant_types': ['authorization_code']",
+        )
+
+        # Verify FastAPI redirect_slashes is explicitly False
+        assert_test(
+            getattr(app, "redirect_slashes", True) is False,
+            "FastAPI app initialized with redirect_slashes=False",
+        )
+
+        # Test trailing slash tolerance: POST /oauth/register/ (with trailing slash)
+        # Must return 201 Created directly, without 307 Temporary Redirect (which strips body)
+        dcr_slash_req = MockRequest(
+            method="POST",
+            url="https://my-store-mcp.workers.dev/oauth/register/",
+            headers={"cf-connecting-ip": "198.51.100.13", "content-type": "application/json"},
+            body=json.dumps(dcr_valid_payload),
+        )
+        dcr_slash_res = await on_fetch(dcr_slash_req, env)
+        assert_test(
+            dcr_slash_res.status == 201,
+            "POST /oauth/register/ (with trailing slash) returns 201 directly without 307 redirect",
+        )
+        slash_json = json.loads(dcr_slash_res.body)
+        assert_test(
+            slash_json.get("client_id") is not None,
+            "Trailing slash POST retains request body and produces valid client_id",
+        )
 
     # Test DCR invalid payload rejection (missing redirect_uris)
     dcr_bad_req = MockRequest(
@@ -433,7 +448,16 @@ async def run_all_tests():
     posted_token_payload = {}
 
     async def mock_mgmt_http_post(url, headers, payload, timeout_seconds=10.0):
-        if url.endswith("/oauth/token"):
+        if url.endswith("/oidc/register"):
+            return 201, json.dumps({
+                "client_id": "newly_created_client_777",
+                "client_name": payload.get("client_name"),
+                "redirect_uris": payload.get("redirect_uris"),
+                "token_endpoint_auth_method": "none",
+                "response_types": ["code"],
+                "grant_types": ["authorization_code"],
+            })
+        elif url.endswith("/oauth/token"):
             posted_token_payload.update(payload)
             return 200, json.dumps({
                 "access_token": "mock_mgmt_api_token_abc123",

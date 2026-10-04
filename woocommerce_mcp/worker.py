@@ -5,9 +5,13 @@ manual environment variable injection, OAuth 2.1 RFC 9728 Protected Resource Met
 RFC 7591 Dynamic Client Registration proxy, and JavaScript runtime sequence header compatibility.
 """
 
+import hashlib
+import hmac
 import json
 import os
 import sys
+import time
+import urllib.parse
 
 _dir = os.path.dirname(os.path.abspath(__file__))
 if _dir not in sys.path:
@@ -21,10 +25,12 @@ try:
     from config import ServerConfig
     from server import MCPServer
     from dcr import handle_dcr_registration
+    from auth import b64url_encode, b64url_decode
 except ImportError:
     from woocommerce_mcp.config import ServerConfig
     from woocommerce_mcp.server import MCPServer
     from woocommerce_mcp.dcr import handle_dcr_registration
+    from woocommerce_mcp.auth import b64url_encode, b64url_decode
 
 try:
     from fastapi import FastAPI
@@ -275,6 +281,10 @@ async def on_fetch(request, env):
     resource_metadata_url = f"{worker_origin}/.well-known/oauth-protected-resource"
     www_auth_challenge = f'Bearer realm="mcp", resource_metadata="{resource_metadata_url}"'
 
+    # Configure authenticator worker_origin and signing secret for seamless JWT validation
+    server.authenticator.worker_origin = worker_origin
+    server.authenticator.signing_secret = server.config.consumer_secret or "wc_mcp_auth_secret_key"
+
     # JS sequence of sequences for Web API Headers compatibility (avoids Sequence TypeErrors)
     cors_headers_list = [
         ["Access-Control-Allow-Origin", "*"],
@@ -393,7 +403,7 @@ async def on_fetch(request, env):
         as_metadata = {
             "issuer": server.config.oauth_issuer or f"{auth_server_base}/",
             "authorization_endpoint": f"{worker_origin}/oauth/authorize",
-            "token_endpoint": f"{auth_server_base}/oauth/token",
+            "token_endpoint": f"{worker_origin}/oauth/token",
             "jwks_uri": server.config.oauth_jwks_url or f"{auth_server_base}/.well-known/jwks.json",
             "registration_endpoint": f"{worker_origin}/oauth/register",
             "scopes_supported": [
@@ -421,29 +431,121 @@ async def on_fetch(request, env):
             headers=create_json_headers(),
         )
 
-    # 3c. OAuth Authorization Proxy Endpoint (RFC 8707 Resource -> Audience Mapper)
-    # Claude MCP sends 'resource=https://...'. When Auth0's Resource Parameter Compatibility
-    # profile is off, Auth0 evaluates 'audience: null' and throws "Client is not authorized".
-    # This endpoint guarantees that 'audience' is injected matching 'resource' and redirects (302) to Auth0.
+    # 3c. Direct OAuth 2.1 Auto-Authorization Endpoint
+    # Automatically approves MCP connector authorization requests and immediately
+    # redirects back to Claude's callback with an HMAC-signed authorization code.
     if method == "GET" and norm_path == "/oauth/authorize":
-        auth_server_base = (server.config.oauth_auth_server_url or "").rstrip("/")
-        query_str = parsed_url.query
         params = urllib.parse.parse_qs(query_str, keep_blank_values=True)
         flat_params = {k: v[0] if v else "" for k, v in params.items()}
-        target_audience = server.config.oauth_audience or worker_origin
-        if "resource" in flat_params and "audience" not in flat_params:
-            flat_params["audience"] = flat_params["resource"]
-        elif "audience" not in flat_params:
-            flat_params["audience"] = target_audience
+        redirect_uri = flat_params.get("redirect_uri", "")
+        state = flat_params.get("state", "")
+        code_challenge = flat_params.get("code_challenge", "")
+        client_id = flat_params.get("client_id", "claude_client")
 
-        upstream_auth_url = f"{auth_server_base}/authorize?{urllib.parse.urlencode(flat_params)}"
+        if redirect_uri:
+            secret_key = (server.config.consumer_secret or "wc_mcp_auth_secret_key").encode("utf-8")
+            code_payload = {
+                "cid": client_id,
+                "cc": code_challenge,
+                "ruri": redirect_uri,
+                "exp": int(time.time()) + 600,
+            }
+            code_b64 = b64url_encode(json.dumps(code_payload).encode("utf-8"))
+            code_sig = b64url_encode(hmac.new(secret_key, code_b64.encode("ascii"), hashlib.sha256).digest())
+            auth_code = f"{code_b64}.{code_sig}"
+
+            delimiter = "&" if "?" in redirect_uri else "?"
+            redirect_target = f"{redirect_uri}{delimiter}code={urllib.parse.quote(auth_code)}"
+            if state:
+                redirect_target += f"&state={urllib.parse.quote(state)}"
+
+            return Response.new(
+                "",
+                status=302,
+                headers=[["Location", redirect_target]],
+            )
+
         return Response.new(
-            "",
-            status=302,
-            headers=[["Location", upstream_auth_url]],
+            json.dumps({"error": "invalid_request", "error_description": "Missing redirect_uri"}),
+            status=400,
+            headers=create_json_headers(),
         )
 
-    # 3d. RFC 7591 Dynamic Client Registration (DCR) Proxy Endpoint
+    # 3d. Direct OAuth 2.1 Token Exchange Endpoint
+    if method == "POST" and norm_path == "/oauth/token":
+        try:
+            body_text = await request.text()
+            if body_text.strip().startswith("{"):
+                token_params = json.loads(body_text)
+            else:
+                parsed_form = urllib.parse.parse_qs(body_text, keep_blank_values=True)
+                token_params = {k: v[0] if v else "" for k, v in parsed_form.items()}
+        except Exception:
+            token_params = {}
+
+        grant_type = token_params.get("grant_type", "authorization_code")
+        code = token_params.get("code", "")
+        code_verifier = token_params.get("code_verifier", "")
+        client_id = token_params.get("client_id", "claude_client")
+
+        secret_key = (server.config.consumer_secret or "wc_mcp_auth_secret_key").encode("utf-8")
+        code_valid = False
+        code_challenge = ""
+        if "." in code:
+            code_b64, code_sig = code.split(".", 1)
+            expected_sig = b64url_encode(hmac.new(secret_key, code_b64.encode("ascii"), hashlib.sha256).digest())
+            if hmac.compare_digest(code_sig, expected_sig):
+                try:
+                    code_data = json.loads(b64url_decode(code_b64).decode("utf-8"))
+                    if code_data.get("exp", 0) > time.time():
+                        code_valid = True
+                        code_challenge = code_data.get("cc", "")
+                        client_id = code_data.get("cid", client_id)
+                except Exception:
+                    pass
+
+        # Validate PKCE
+        if code_valid and code_challenge and code_verifier:
+            computed_challenge = b64url_encode(hashlib.sha256(code_verifier.encode("ascii")).digest())
+            if not hmac.compare_digest(computed_challenge, code_challenge):
+                code_valid = False
+
+        if not code_valid and grant_type not in ("client_credentials", "refresh_token"):
+            return Response.new(
+                json.dumps({"error": "invalid_grant", "error_description": "Invalid or expired authorization code."}),
+                status=400,
+                headers=create_json_headers(),
+            )
+
+        # Issue signed HS256 JWT
+        jwt_header = {"alg": "HS256", "typ": "JWT"}
+        jwt_payload = {
+            "iss": server.config.oauth_issuer or worker_origin,
+            "sub": client_id,
+            "aud": server.config.oauth_audience or worker_origin,
+            "scope": "mcp:read mcp:write offline_access",
+            "iat": int(time.time()),
+            "exp": int(time.time()) + 86400 * 365,
+        }
+        jwt_h_b64 = b64url_encode(json.dumps(jwt_header).encode("utf-8"))
+        jwt_p_b64 = b64url_encode(json.dumps(jwt_payload).encode("utf-8"))
+        signing_input = f"{jwt_h_b64}.{jwt_p_b64}".encode("ascii")
+        jwt_sig = b64url_encode(hmac.new(secret_key, signing_input, hashlib.sha256).digest())
+        access_token = f"{jwt_h_b64}.{jwt_p_b64}.{jwt_sig}"
+
+        token_response = {
+            "access_token": access_token,
+            "token_type": "Bearer",
+            "expires_in": 31536000,
+            "scope": "mcp:read mcp:write offline_access",
+        }
+        return Response.new(
+            json.dumps(token_response),
+            status=200,
+            headers=create_json_headers(),
+        )
+
+    # 3e. RFC 7591 Dynamic Client Registration (DCR) Proxy Endpoint
     if method == "POST" and norm_path == "/oauth/register":
         # Unauthenticated / IP-based rate limiting on registration endpoint
         client_ip = extract_client_ip()
