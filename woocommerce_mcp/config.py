@@ -58,23 +58,16 @@ class ServerConfig:
         consumer_secret = os.environ.get("WOOCOMMERCE_CONSUMER_SECRET", "").strip()
 
         # OAuth 2.1 Configuration (Auth0 with RFC 7591 Dynamic Client Registration)
-        oauth_auth_server_url = (
-            os.environ.get("OAUTH_AUTH_SERVER_URL", "").strip().rstrip("/")
-            or "https://woocommerce-mcp-server.us.auth0.com"
-        )
-        oauth_jwks_url = (
-            os.environ.get("OAUTH_JWKS_URL", "").strip()
-            or f"{oauth_auth_server_url}/.well-known/jwks.json"
-        )
-        oauth_audience = (
-            os.environ.get("OAUTH_AUDIENCE", "").strip()
-            or "https://woocommerce-mcp-server.woocommerce-connector.workers.dev"
-        )
-        oauth_issuer = (
-            os.environ.get("OAUTH_ISSUER", "").strip().rstrip("/")
-            or oauth_auth_server_url
-        )
-        if not oauth_issuer.endswith("/"):
+        oauth_auth_server_url = os.environ.get("OAUTH_AUTH_SERVER_URL", "").strip().rstrip("/")
+        oauth_jwks_url = os.environ.get("OAUTH_JWKS_URL", "").strip()
+        if not oauth_jwks_url and oauth_auth_server_url:
+            oauth_jwks_url = f"{oauth_auth_server_url}/.well-known/jwks.json"
+
+        oauth_audience = os.environ.get("OAUTH_AUDIENCE", "").strip()
+        oauth_issuer = os.environ.get("OAUTH_ISSUER", "").strip().rstrip("/")
+        if not oauth_issuer and oauth_auth_server_url:
+            oauth_issuer = oauth_auth_server_url
+        if oauth_issuer and not oauth_issuer.endswith("/"):
             oauth_issuer += "/"
         oauth_resource_url = (
             os.environ.get("OAUTH_RESOURCE_SERVER_URL", "").strip().rstrip("/")

@@ -6,13 +6,12 @@ Claude Desktop, Cursor, and ChatGPT) connecting to the MCP Server via Auth0.
 Ensures critical parser fields (such as 'response_types': ['code'], 'grant_types': ['authorization_code'],
 and 'token_endpoint_auth_method': 'none') are explicitly included in registration responses.
 
-Additionally automates Auth0 Client Grant creation via the Auth0 Management API immediately
-after client creation, granting newly registered clients access to the custom API audience
-('https://woocommerce-mcp-server.woocommerce-connector.workers.dev') with scopes
-['mcp:read', 'mcp:write', 'offline_access'].
+Supports:
+1. Static Public Native Client ID (industry-standard for desktop AI clients with Auth0 PKCE,
+   preventing tenant application ceiling errors).
+2. Dynamic upstream client registration via Auth0's RFC 7591 /oidc/register endpoint.
 """
 
-import hashlib
 import json
 import logging
 import time
@@ -20,10 +19,6 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 logger = logging.getLogger("woocommerce_mcp.dcr")
-
-# In-memory cache for Auth0 Management API M2M tokens
-# Key: f"{auth_server_url}:{m2m_client_id}" -> {"access_token": str, "expires_at": float}
-_mgmt_token_cache: Dict[str, Dict[str, Any]] = {}
 
 
 def log_console_error(message: str) -> None:
@@ -115,151 +110,18 @@ async def _async_http_post(
         return 0, str(exc)
 
 
-async def get_auth0_management_token(
-    auth_server_url: str,
-    m2m_client_id: str,
-    m2m_client_secret: str,
-    timeout_seconds: float = 10.0,
-) -> Optional[str]:
-    """
-    Obtain or reuse a cached Auth0 Management API M2M access token.
-    Calls POST https://<TENANT_DOMAIN>/oauth/token with audience https://<TENANT_DOMAIN>/api/v2/.
-    """
-    clean_url = auth_server_url.rstrip("/")
-    if not clean_url or not m2m_client_id or not m2m_client_secret:
-        return None
-
-    cache_key = f"{clean_url}:{m2m_client_id}"
-    cached = _mgmt_token_cache.get(cache_key)
-    if cached and cached.get("expires_at", 0) > time.time() + 60:
-        return str(cached["access_token"])
-
-    token_url = f"{clean_url}/oauth/token"
-    audience = f"{clean_url}/api/v2/"
-    req_body = {
-        "grant_type": "client_credentials",
-        "client_id": m2m_client_id,
-        "client_secret": m2m_client_secret,
-        "audience": audience,
-    }
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "User-Agent": "WooCommerce-MCP-DCR-Proxy/1.0",
-    }
-
-    status, resp_text = await _async_http_post(token_url, headers, req_body, timeout_seconds=timeout_seconds)
-
-    if status in (200, 201):
-        try:
-            data = json.loads(resp_text)
-            access_token = data.get("access_token")
-            expires_in = int(data.get("expires_in", 86400))
-            if access_token:
-                _mgmt_token_cache[cache_key] = {
-                    "access_token": access_token,
-                    "expires_at": time.time() + expires_in,
-                }
-                return str(access_token)
-        except Exception as exc:
-            log_console_error(f"[Auth0 DCR] Failed to parse Management API token response: {exc}")
-            return None
-
-    log_console_error(
-        f"[Auth0 DCR] Failed to obtain Management API token: HTTP {status} - {resp_text}"
-    )
-    return None
-
-
-async def create_client_grant(
-    client_id: str,
-    audience: str,
-    auth_server_url: str,
-    m2m_client_id: str = "",
-    m2m_client_secret: str = "",
-    scope: Optional[List[str]] = None,
-    timeout_seconds: float = 10.0,
-) -> Tuple[bool, str]:
-    """
-    Automate Client Grant creation via Auth0 Management API.
-    POST https://<TENANT_DOMAIN>/api/v2/client-grants with:
-      {
-        "client_id": "<NEWLY_CREATED_CLIENT_ID>",
-        "audience": "<RESOURCE_SERVER_AUDIENCE>",
-        "scope": ["mcp:read", "mcp:write", "offline_access"]
-      }
-    """
-    clean_url = auth_server_url.rstrip("/")
-    if not clean_url:
-        return False, "Auth server URL not configured"
-
-    if not m2m_client_id or not m2m_client_secret:
-        logger.debug("[Auth0 DCR] No M2M credentials configured; skipping Client Grant automation.")
-        return False, "M2M credentials not configured"
-
-    # 1. Fetch Management API access token
-    mgmt_token = await get_auth0_management_token(
-        clean_url,
-        m2m_client_id=m2m_client_id,
-        m2m_client_secret=m2m_client_secret,
-        timeout_seconds=timeout_seconds,
-    )
-
-    if not mgmt_token:
-        err_msg = f"[Auth0 DCR] Unable to create Client Grant: failed to acquire Management API token."
-        log_console_error(err_msg)
-        return False, err_msg
-
-    # 2. POST /api/v2/client-grants
-    grants_url = f"{clean_url}/api/v2/client-grants"
-    grant_payload = {
-        "client_id": client_id,
-        "audience": audience,
-        "scope": scope if scope is not None else ["mcp:read", "mcp:write", "offline_access"],
-    }
-    headers = {
-        "Authorization": f"Bearer {mgmt_token}",
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "User-Agent": "WooCommerce-MCP-DCR-Proxy/1.0",
-    }
-
-    status, resp_text = await _async_http_post(grants_url, headers, grant_payload, timeout_seconds=timeout_seconds)
-
-    # If Auth0 rejects due to an unregistered scope (e.g. 'offline_access' not configured on custom API),
-    # retry automatically with only custom API scopes
-    if status == 400 and "offline_access" in grant_payload.get("scope", []):
-        logger.info("[Auth0 DCR] Retrying Client Grant without 'offline_access' scope...")
-        grant_payload["scope"] = [s for s in grant_payload["scope"] if s != "offline_access"]
-        status, resp_text = await _async_http_post(grants_url, headers, grant_payload, timeout_seconds=timeout_seconds)
-
-    if status in (200, 201):
-        logger.info("[Auth0 DCR] Client Grant created successfully for client_id='%s', audience='%s'", client_id, audience)
-        return True, "Created"
-    elif status == 409:
-        logger.info("[Auth0 DCR] Client Grant already exists for client_id='%s', audience='%s'", client_id, audience)
-        return True, "Already exists"
-    else:
-        err_msg = f"[Auth0 DCR] Failed to create Client Grant for client '{client_id}': HTTP {status} - {resp_text}"
-        log_console_error(err_msg)
-        return False, err_msg
-
-
 async def handle_dcr_registration(
     payload: Dict[str, Any],
     auth_server_url: str = "",
-    audience: str = "https://woocommerce-mcp-server.woocommerce-connector.workers.dev",
-    m2m_client_id: str = "",
-    m2m_client_secret: str = "",
-    static_client_id: str = "",
+    audience: str = "",
     timeout_seconds: float = 10.0,
 ) -> Tuple[int, Dict[str, Any]]:
     """
-    Handles RFC 7591 Dynamic Client Registration and automates Client Grant creation.
-    1. Validates and sanitizes incoming client registration payload.
-    2. Uses static pre-registered Auth0 client or registers upstream with Auth0.
-    3. Automates creation of an Auth0 Client Grant for audience and scopes.
-    4. Returns a strictly compliant DCR response with 'response_types': ['code'].
+    Handles RFC 7591 Dynamic Client Registration Proxy for Auth0:
+    1. Validates and sanitizes incoming client registration payload from Claude / MCP client.
+    2. Registers dynamically upstream with Auth0 at /oidc/register.
+    3. Guarantees 'response_types': ['code'], 'grant_types': ['authorization_code'],
+       and 'token_endpoint_auth_method': 'none' in the response so Claude's client parser succeeds.
 
     Returns:
         (status_code: int, response_body: dict)
@@ -276,44 +138,9 @@ async def handle_dcr_registration(
     redirect_uris = [str(u).strip() for u in payload.get("redirect_uris", [])]
     token_auth_method = str(payload.get("token_endpoint_auth_method") or "none").strip()
     app_type = str(payload.get("application_type") or "native").strip()
-    target_audience = audience or "https://woocommerce-mcp-server.woocommerce-connector.workers.dev"
 
-    # Option A: If a dedicated Auth0 client ID is provided, reuse it directly!
-    # This avoids Auth0's tenant application ceiling ('too_many_entities') and ensures
-    # the client is 100% recognized by Auth0's /authorize endpoint.
-    if static_client_id:
-        if auth_server_url and m2m_client_id and m2m_client_secret:
-            try:
-                await create_client_grant(
-                    client_id=static_client_id,
-                    audience=target_audience,
-                    auth_server_url=auth_server_url,
-                    m2m_client_id=m2m_client_id,
-                    m2m_client_secret=m2m_client_secret,
-                    scope=["mcp:read", "mcp:write", "offline_access"],
-                    timeout_seconds=timeout_seconds,
-                )
-            except Exception as grant_exc:
-                log_console_error(f"[Auth0 DCR] Exception during Client Grant automation: {grant_exc}")
-
-        return 201, {
-            "client_id": static_client_id,
-            "client_name": client_name,
-            "redirect_uris": redirect_uris,
-            "token_endpoint_auth_method": token_auth_method,
-            "response_types": ["code"],
-            "grant_types": ["authorization_code"],
-            "application_type": app_type,
-            "client_id_issued_at": int(time.time()),
-        }
-
-    # Base upstream Auth0 DCR URL if configured
+    # Upstream Auth0 Dynamic Client Registration (/oidc/register)
     auth0_dcr_url = f"{auth_server_url.rstrip('/')}/oidc/register" if auth_server_url else ""
-    upstream_data: Optional[Dict[str, Any]] = None
-    status = 0
-    resp_text = ""
-
-    # 2. Attempt upstream registration if Auth0 URL is provided
     if not auth0_dcr_url:
         return 500, {
             "error": "server_error",
@@ -336,6 +163,8 @@ async def handle_dcr_registration(
     status, resp_text = await _async_http_post(
         auth0_dcr_url, headers, upstream_payload, timeout_seconds=timeout_seconds
     )
+
+    upstream_data: Optional[Dict[str, Any]] = None
     if status in (200, 201):
         try:
             parsed = json.loads(resp_text)
@@ -344,51 +173,28 @@ async def handle_dcr_registration(
         except Exception as json_err:
             log_console_error(f"[Auth0 DCR] Failed to parse Auth0 response JSON: {json_err}")
 
-    # 3. Determine client_id - use upstream Auth0 if available, or self-contained worker client ID
     if upstream_data and "client_id" in upstream_data:
         client_id = str(upstream_data["client_id"])
         client_secret = upstream_data.get("client_secret")
-    else:
-        # Fallback to self-contained client ID so Claude connects seamlessly without Auth0 entity limits
-        logger.info("[Auth0 DCR] Using self-contained worker client ID for seamless connector authentication.")
-        client_id = f"claude-{hashlib.sha256(f'{client_name}:{redirect_uris[0]}'.encode()).hexdigest()[:16]}"
-        client_secret = None
 
-    # 4. Automate Client Grant creation via Management API
-    if auth_server_url:
-        if m2m_client_id and m2m_client_secret:
-            try:
-                await create_client_grant(
-                    client_id=client_id,
-                    audience=target_audience,
-                    auth_server_url=auth_server_url,
-                    m2m_client_id=m2m_client_id,
-                    m2m_client_secret=m2m_client_secret,
-                    scope=["mcp:read", "mcp:write", "offline_access"],
-                    timeout_seconds=timeout_seconds,
-                )
-            except Exception as grant_exc:
-                log_console_error(f"[Auth0 DCR] Exception during Client Grant automation: {grant_exc}")
-        else:
-            log_console_error(
-                f"[Auth0 DCR] WARNING: Cannot automate Client Grant for client '{client_id}': "
-                f"AUTH0_M2M_CLIENT_ID and/or AUTH0_M2M_CLIENT_SECRET are not configured on the worker. "
-                f"Client will not have authorization for audience '{target_audience}' until granted."
-            )
+        response_body = {
+            "client_id": client_id,
+            "client_name": client_name,
+            "redirect_uris": redirect_uris,
+            "token_endpoint_auth_method": token_auth_method,
+            "response_types": ["code"],
+            "grant_types": ["authorization_code"],
+            "application_type": app_type,
+            "client_id_issued_at": int(time.time()),
+        }
+        if client_secret:
+            response_body["client_secret"] = str(client_secret)
+        return 201, response_body
 
-    # 5. Formulate strictly-compliant RFC 7591 JSON response
-    response_body = {
-        "client_id": client_id,
-        "client_name": client_name,
-        "redirect_uris": redirect_uris,
-        "token_endpoint_auth_method": token_auth_method,
-        "response_types": ["code"],
-        "grant_types": ["authorization_code"],
-        "application_type": app_type,
-        "client_id_issued_at": int(time.time()),
+    # If upstream registration failed, return error with clear message
+    err_desc = f"Auth0 dynamic registration failed (HTTP {status}): {resp_text}"
+    log_console_error(f"[Auth0 DCR] {err_desc}")
+    return (status if status in (400, 401, 403, 429) else 400), {
+        "error": "registration_failed",
+        "error_description": err_desc,
     }
-
-    if client_secret:
-        response_body["client_secret"] = str(client_secret)
-
-    return 201, response_body

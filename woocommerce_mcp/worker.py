@@ -82,9 +82,6 @@ def inject_env_variables(env) -> None:
         "OAUTH_JWKS_CACHE_TTL_SECONDS",
         "MCP_RATE_LIMIT_MAX_REQUESTS",
         "MCP_RATE_LIMIT_WINDOW_SECONDS",
-        "AUTH0_M2M_CLIENT_ID",
-        "AUTH0_M2M_CLIENT_SECRET",
-        "AUTH0_STATIC_CLIENT_ID",
         "WOOCOMMERCE_MAX_RETRIES",
         "WOOCOMMERCE_TIMEOUT_SECONDS",
     ]
@@ -125,33 +122,16 @@ def get_server_for_env(env) -> MCPServer:
     consumer_secret = get_var("WOOCOMMERCE_CONSUMER_SECRET", "")
 
     # OAuth 2.1 Configuration (Auth0 with RFC 7591 Dynamic Client Registration)
-    oauth_auth_server_url = (
-        get_var("OAUTH_AUTH_SERVER_URL", "").rstrip("/")
-        or "https://woocommerce-mcp-server.us.auth0.com"
-    )
-    oauth_jwks_url = (
-        get_var("OAUTH_JWKS_URL", "")
-        or f"{oauth_auth_server_url}/.well-known/jwks.json"
-    )
-    oauth_audience = (
-        get_var("OAUTH_AUDIENCE", "")
-        or "https://woocommerce-mcp-server.woocommerce-connector.workers.dev"
-    )
-    auth0_m2m_client_id = (
-        get_var("AUTH0_M2M_CLIENT_ID", "")
-        or get_var("AUTH0_CLIENT_ID", "")
-        or get_var("AUTH0_MGMT_CLIENT_ID", "")
-    )
-    auth0_m2m_client_secret = (
-        get_var("AUTH0_M2M_CLIENT_SECRET", "")
-        or get_var("AUTH0_CLIENT_SECRET", "")
-        or get_var("AUTH0_MGMT_CLIENT_SECRET", "")
-    )
-    auth0_static_client_id = get_var("AUTH0_STATIC_CLIENT_ID", "")
-    oauth_issuer = (
-        get_var("OAUTH_ISSUER", "").rstrip("/") or oauth_auth_server_url
-    )
-    if not oauth_issuer.endswith("/"):
+    oauth_auth_server_url = get_var("OAUTH_AUTH_SERVER_URL", "").rstrip("/")
+    oauth_jwks_url = get_var("OAUTH_JWKS_URL", "")
+    if not oauth_jwks_url and oauth_auth_server_url:
+        oauth_jwks_url = f"{oauth_auth_server_url}/.well-known/jwks.json"
+
+    oauth_audience = get_var("OAUTH_AUDIENCE", "")
+    oauth_issuer = get_var("OAUTH_ISSUER", "").rstrip("/")
+    if not oauth_issuer and oauth_auth_server_url:
+        oauth_issuer = oauth_auth_server_url
+    if oauth_issuer and not oauth_issuer.endswith("/"):
         oauth_issuer += "/"
     oauth_resource_url = (
         get_var("OAUTH_RESOURCE_SERVER_URL", "").rstrip("/")
@@ -200,9 +180,6 @@ def get_server_for_env(env) -> MCPServer:
             and _server_instance.config.consumer_key == consumer_key
             and _server_instance.config.consumer_secret == consumer_secret
             and _server_instance.config.oauth_auth_server_url == oauth_auth_server_url
-            and _server_instance.config.auth0_m2m_client_id == auth0_m2m_client_id
-            and _server_instance.config.auth0_m2m_client_secret == auth0_m2m_client_secret
-            and _server_instance.config.auth0_static_client_id == auth0_static_client_id
         ):
             return _server_instance
 
@@ -222,9 +199,6 @@ def get_server_for_env(env) -> MCPServer:
         unauth_rate_limit_window_seconds=unauth_rate_limit_window,
         wc_max_retries=wc_max_retries,
         wc_timeout_seconds=wc_timeout,
-        auth0_m2m_client_id=auth0_m2m_client_id,
-        auth0_m2m_client_secret=auth0_m2m_client_secret,
-        auth0_static_client_id=auth0_static_client_id,
     )
     _server_instance = MCPServer(config)
     return _server_instance
@@ -276,14 +250,21 @@ async def on_fetch(request, env):
         host = rest.split("/")[0]
         worker_origin = f"{scheme}://{host}"
     else:
-        worker_origin = "https://woocommerce-mcp-server.workers.dev"
+        host_header = ""
+        try:
+            if hasattr(request, "headers") and request.headers:
+                host_header = request.headers.get("host", "") or request.headers.get("Host", "")
+        except Exception:
+            pass
+        worker_origin = f"https://{host_header}" if host_header else "http://localhost:3000"
 
     resource_metadata_url = f"{worker_origin}/.well-known/oauth-protected-resource"
     www_auth_challenge = f'Bearer realm="mcp", resource_metadata="{resource_metadata_url}"'
 
-    # Configure authenticator worker_origin and signing secret for seamless JWT validation
+    # Configure authenticator worker_origin for JWT validation
     server.authenticator.worker_origin = worker_origin
-    server.authenticator.signing_secret = server.config.consumer_secret or "wc_mcp_auth_secret_key"
+    if not server.authenticator.expected_audience:
+        server.authenticator.expected_audience = worker_origin
 
     # JS sequence of sequences for Web API Headers compatibility (avoids Sequence TypeErrors)
     cors_headers_list = [
@@ -402,8 +383,8 @@ async def on_fetch(request, env):
         auth_server_base = (server.config.oauth_auth_server_url or "").rstrip("/")
         as_metadata = {
             "issuer": server.config.oauth_issuer or f"{auth_server_base}/",
-            "authorization_endpoint": f"{worker_origin}/oauth/authorize",
-            "token_endpoint": f"{worker_origin}/oauth/token",
+            "authorization_endpoint": f"{auth_server_base}/authorize",
+            "token_endpoint": f"{auth_server_base}/oauth/token",
             "jwks_uri": server.config.oauth_jwks_url or f"{auth_server_base}/.well-known/jwks.json",
             "registration_endpoint": f"{worker_origin}/oauth/register",
             "scopes_supported": [
@@ -431,117 +412,35 @@ async def on_fetch(request, env):
             headers=create_json_headers(),
         )
 
-    # 3c. Direct OAuth 2.1 Auto-Authorization Endpoint
-    # Automatically approves MCP connector authorization requests and immediately
-    # redirects back to Claude's callback with an HMAC-signed authorization code.
+    # 3c. OAuth 2.1 Authorization Endpoint Forwarder
+    # Forwards directly to Auth0's Universal Login page with human authentication
     if method == "GET" and norm_path == "/oauth/authorize":
-        params = urllib.parse.parse_qs(query_str, keep_blank_values=True)
-        flat_params = {k: v[0] if v else "" for k, v in params.items()}
-        redirect_uri = flat_params.get("redirect_uri", "")
-        state = flat_params.get("state", "")
-        code_challenge = flat_params.get("code_challenge", "")
-        client_id = flat_params.get("client_id", "claude_client")
-
-        if redirect_uri:
-            secret_key = (server.config.consumer_secret or "wc_mcp_auth_secret_key").encode("utf-8")
-            code_payload = {
-                "cid": client_id,
-                "cc": code_challenge,
-                "ruri": redirect_uri,
-                "exp": int(time.time()) + 600,
-            }
-            code_b64 = b64url_encode(json.dumps(code_payload).encode("utf-8"))
-            code_sig = b64url_encode(hmac.new(secret_key, code_b64.encode("ascii"), hashlib.sha256).digest())
-            auth_code = f"{code_b64}.{code_sig}"
-
-            delimiter = "&" if "?" in redirect_uri else "?"
-            redirect_target = f"{redirect_uri}{delimiter}code={urllib.parse.quote(auth_code)}"
-            if state:
-                redirect_target += f"&state={urllib.parse.quote(state)}"
-
-            return Response.new(
-                "",
-                status=302,
-                headers=[["Location", redirect_target]],
-            )
-
+        auth_server_base = (server.config.oauth_auth_server_url or "").rstrip("/")
+        if not auth_server_base:
+            err_body = json.dumps({
+                "error": "server_misconfiguration",
+                "error_description": "OAUTH_AUTH_SERVER_URL environment variable is not configured.",
+            })
+            return Response.new(err_body, status=500, headers=create_json_headers())
+        target = f"{auth_server_base}/authorize"
+        if query_str:
+            target += f"?{query_str}"
         return Response.new(
-            json.dumps({"error": "invalid_request", "error_description": "Missing redirect_uri"}),
-            status=400,
-            headers=create_json_headers(),
+            "",
+            status=302,
+            headers=[["Location", target]],
         )
 
-    # 3d. Direct OAuth 2.1 Token Exchange Endpoint
+    # 3d. Direct OAuth 2.1 Token Exchange Notification
     if method == "POST" and norm_path == "/oauth/token":
-        try:
-            body_text = await request.text()
-            if body_text.strip().startswith("{"):
-                token_params = json.loads(body_text)
-            else:
-                parsed_form = urllib.parse.parse_qs(body_text, keep_blank_values=True)
-                token_params = {k: v[0] if v else "" for k, v in parsed_form.items()}
-        except Exception:
-            token_params = {}
-
-        grant_type = token_params.get("grant_type", "authorization_code")
-        code = token_params.get("code", "")
-        code_verifier = token_params.get("code_verifier", "")
-        client_id = token_params.get("client_id", "claude_client")
-
-        secret_key = (server.config.consumer_secret or "wc_mcp_auth_secret_key").encode("utf-8")
-        code_valid = False
-        code_challenge = ""
-        if "." in code:
-            code_b64, code_sig = code.split(".", 1)
-            expected_sig = b64url_encode(hmac.new(secret_key, code_b64.encode("ascii"), hashlib.sha256).digest())
-            if hmac.compare_digest(code_sig, expected_sig):
-                try:
-                    code_data = json.loads(b64url_decode(code_b64).decode("utf-8"))
-                    if code_data.get("exp", 0) > time.time():
-                        code_valid = True
-                        code_challenge = code_data.get("cc", "")
-                        client_id = code_data.get("cid", client_id)
-                except Exception:
-                    pass
-
-        # Validate PKCE
-        if code_valid and code_challenge and code_verifier:
-            computed_challenge = b64url_encode(hashlib.sha256(code_verifier.encode("ascii")).digest())
-            if not hmac.compare_digest(computed_challenge, code_challenge):
-                code_valid = False
-
-        if not code_valid and grant_type not in ("client_credentials", "refresh_token"):
-            return Response.new(
-                json.dumps({"error": "invalid_grant", "error_description": "Invalid or expired authorization code."}),
-                status=400,
-                headers=create_json_headers(),
-            )
-
-        # Issue signed HS256 JWT
-        jwt_header = {"alg": "HS256", "typ": "JWT"}
-        jwt_payload = {
-            "iss": server.config.oauth_issuer or worker_origin,
-            "sub": client_id,
-            "aud": server.config.oauth_audience or worker_origin,
-            "scope": "mcp:read mcp:write offline_access",
-            "iat": int(time.time()),
-            "exp": int(time.time()) + 86400 * 365,
-        }
-        jwt_h_b64 = b64url_encode(json.dumps(jwt_header).encode("utf-8"))
-        jwt_p_b64 = b64url_encode(json.dumps(jwt_payload).encode("utf-8"))
-        signing_input = f"{jwt_h_b64}.{jwt_p_b64}".encode("ascii")
-        jwt_sig = b64url_encode(hmac.new(secret_key, signing_input, hashlib.sha256).digest())
-        access_token = f"{jwt_h_b64}.{jwt_p_b64}.{jwt_sig}"
-
-        token_response = {
-            "access_token": access_token,
-            "token_type": "Bearer",
-            "expires_in": 31536000,
-            "scope": "mcp:read mcp:write offline_access",
-        }
+        auth_server_base = (server.config.oauth_auth_server_url or "").rstrip("/")
+        err_body = json.dumps({
+            "error": "invalid_request",
+            "error_description": f"Token exchange must be performed directly at the Auth0 token endpoint: {auth_server_base}/oauth/token",
+        })
         return Response.new(
-            json.dumps(token_response),
-            status=200,
+            err_body,
+            status=400,
             headers=create_json_headers(),
         )
 
@@ -579,9 +478,6 @@ async def on_fetch(request, env):
             payload,
             auth_server_url=server.config.oauth_auth_server_url,
             audience=server.config.oauth_audience,
-            m2m_client_id=server.config.auth0_m2m_client_id,
-            m2m_client_secret=server.config.auth0_m2m_client_secret,
-            static_client_id=server.config.auth0_static_client_id,
         )
         return Response.new(
             json.dumps(dcr_resp),

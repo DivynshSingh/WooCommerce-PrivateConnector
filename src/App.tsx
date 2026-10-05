@@ -44,19 +44,19 @@ export default function App() {
           </div>
           <div>
             <span className="text-slate-500 block">Auth Server (Auth0):</span>
-            <code className="text-indigo-400 break-all">https://woocommerce-mcp-server.us.auth0.com</code>
+            <code className="text-indigo-400 break-all">{"${OAUTH_AUTH_SERVER_URL}"} (Set via Cloudflare env/wrangler.toml)</code>
           </div>
           <div>
             <span className="text-slate-500 block">API Audience (Resource Server):</span>
-            <code className="text-amber-400 break-all">https://woocommerce-mcp-server.woocommerce-connector.workers.dev</code>
+            <code className="text-amber-400 break-all">{"${OAUTH_AUDIENCE}"} (Auto-derives from Worker origin if unset)</code>
           </div>
           <div>
             <span className="text-slate-500 block">JWKS Endpoint (RS256):</span>
-            <code className="text-sky-400 break-all">https://woocommerce-mcp-server.us.auth0.com/.well-known/jwks.json</code>
+            <code className="text-sky-400 break-all">{"${OAUTH_JWKS_URL}"} (Auto-derives from Auth Server /.well-known/jwks.json)</code>
           </div>
           <div>
             <span className="text-slate-500 block">WooCommerce Store Target:</span>
-            <code className="text-emerald-400 break-all">https://dev-anythingstore37.pantheonsite.io</code>
+            <code className="text-emerald-400 break-all">{"${WOOCOMMERCE_STORE_URL}"} (Configured per deployment)</code>
           </div>
           <div className="pt-2 border-t border-slate-900 grid grid-cols-2 gap-2 text-[11px]">
             <div>

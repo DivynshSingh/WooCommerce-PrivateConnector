@@ -202,13 +202,16 @@ class MCPHTTPHandler(http.server.BaseHTTPRequestHandler):
 
         # RFC 9728 Protected Resource Metadata endpoint
         if path == "/.well-known/oauth-protected-resource":
+            host_header = self.headers.get("Host") or "localhost:3000"
+            scheme = "https" if self.headers.get("X-Forwarded-Proto") == "https" else "http"
+            base_origin = self.server_instance.config.oauth_resource_server_url or f"{scheme}://{host_header}"
             auth_servers = []
             if self.server_instance.config.oauth_auth_server_url:
                 auth_servers.append(self.server_instance.config.oauth_auth_server_url)
             self._send_json_response(200, {
-                "resource": self.server_instance.config.oauth_resource_server_url or "http://localhost:3000",
+                "resource": base_origin,
                 "authorization_servers": auth_servers,
-                "registration_endpoint": f"{self.server_instance.config.oauth_resource_server_url or 'http://localhost:3000'}/oauth/register",
+                "registration_endpoint": f"{base_origin}/oauth/register",
                 "scopes_supported": ["mcp:read", "mcp:write"],
                 "bearer_methods_supported": ["header"],
                 "resource_documentation": "https://modelcontextprotocol.io",

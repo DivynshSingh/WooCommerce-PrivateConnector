@@ -1,4 +1,4 @@
-name = "woocommerce-mcp-server"
+name = "woocommerce-mcp-server-v2"
 main = "worker.py"
 compatibility_date = "2024-09-23"
 compatibility_flags = ["python_workers"]
@@ -8,10 +8,10 @@ compatibility_flags = ["python_workers"]
 WOOCOMMERCE_STORE_URL = "https://dev-anythingstore37.pantheonsite.io"
 
 # OAuth 2.0 / 2.1 Authorization Server (Auth0 with RFC 7591 Dynamic Client Registration)
-OAUTH_AUTH_SERVER_URL = "https://woocommerce-mcp-server.us.auth0.com"
-OAUTH_JWKS_URL = "https://woocommerce-mcp-server.us.auth0.com/.well-known/jwks.json"
-OAUTH_ISSUER = "https://woocommerce-mcp-server.us.auth0.com/"
-OAUTH_AUDIENCE = "https://woocommerce-mcp-server.woocommerce-connector.workers.dev"
+OAUTH_AUTH_SERVER_URL = "https://woocommerce-mcp-server-v2.us.auth0.com"
+# Optional overrides (JWKS URL and Issuer are automatically derived from OAUTH_AUTH_SERVER_URL if omitted;
+# Audience automatically derives from the Worker's own origin URL if omitted):
+OAUTH_AUDIENCE = "https://woocommerce-mcp-server-v2.woocommerce-connector.workers.dev"
 OAUTH_JWKS_CACHE_TTL_SECONDS = "300"
 
 # Dual-Layer Rate Limiting Policy
@@ -29,5 +29,3 @@ WOOCOMMERCE_TIMEOUT_SECONDS = "15"
 # Sensitive secrets (configure via Cloudflare Dashboard or `npx wrangler secret put`):
 # - WOOCOMMERCE_CONSUMER_KEY
 # - WOOCOMMERCE_CONSUMER_SECRET
-# - AUTH0_M2M_CLIENT_ID
-# - AUTH0_M2M_CLIENT_SECRET

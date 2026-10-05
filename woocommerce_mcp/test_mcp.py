@@ -39,7 +39,7 @@ if current_dir not in sys.path:
 try:
     from auth import Authenticator, b64url_decode, b64url_encode, SHA256_DIGEST_INFO, verify_rs256
     from config import ServerConfig
-    from dcr import handle_dcr_registration, validate_dcr_payload, create_client_grant, get_auth0_management_token
+    from dcr import handle_dcr_registration, validate_dcr_payload
     from rate_limiter import RateLimiter
     from server import MCPServer
     from tools import execute_tool, get_tool_definitions, validate_input
@@ -48,7 +48,7 @@ try:
 except ImportError:
     from woocommerce_mcp.auth import Authenticator, b64url_decode, b64url_encode, SHA256_DIGEST_INFO, verify_rs256
     from woocommerce_mcp.config import ServerConfig
-    from woocommerce_mcp.dcr import handle_dcr_registration, validate_dcr_payload, create_client_grant, get_auth0_management_token
+    from woocommerce_mcp.dcr import handle_dcr_registration, validate_dcr_payload
     from woocommerce_mcp.rate_limiter import RateLimiter
     from woocommerce_mcp.server import MCPServer
     from woocommerce_mcp.tools import execute_tool, get_tool_definitions, validate_input
@@ -156,9 +156,9 @@ async def run_all_tests():
     print("  WooCommerce MCP Server - Auth0 (DCR Proxy) & Rate Limiting Suite       ")
     print(f"{'='*70}{RESET}")
 
-    auth0_domain = "https://woocommerce-mcp-server.us.auth0.com"
+    auth0_domain = "https://woocommerce-mcp-server-v2.us.auth0.com"
     auth0_issuer = f"{auth0_domain}/"
-    auth0_audience = "https://woocommerce-mcp-server.woocommerce-connector.workers.dev"
+    auth0_audience = "https://woocommerce-mcp-server-v2.woocommerce-connector.workers.dev"
 
     auth0_jwk = {
         "kty": "RSA",
@@ -349,58 +349,73 @@ async def run_all_tests():
         "token_endpoint_auth_method": "none",
         "application_type": "native",
     }
-    dcr_req = MockRequest(
-        method="POST",
-        url="https://my-store-mcp.workers.dev/oauth/register",
-        headers={"cf-connecting-ip": "198.51.100.10", "content-type": "application/json"},
-        body=json.dumps(dcr_valid_payload),
-    )
-    dcr_res = await on_fetch(dcr_req, env)
-    assert_test(dcr_res.status == 201, "POST /oauth/register returns 201 Created")
-    dcr_json = json.loads(dcr_res.body)
+    from unittest.mock import patch
 
-    assert_test(bool(dcr_json.get("client_id")), f"Contains valid client_id: {dcr_json.get('client_id')}")
-    assert_test(
-        dcr_json.get("redirect_uris") == dcr_valid_payload["redirect_uris"],
-        "Contains exact requested redirect_uris",
-    )
-    assert_test(
-        dcr_json.get("token_endpoint_auth_method") == "none",
-        "Contains 'token_endpoint_auth_method': 'none'",
-    )
-    assert_test(
-        dcr_json.get("response_types") == ["code"],
-        "CRITICAL: Contains 'response_types': ['code'] to prevent Claude parser crashes",
-    )
-    assert_test(
-        dcr_json.get("grant_types") == ["authorization_code"],
-        "CRITICAL: Contains 'grant_types': ['authorization_code']",
-    )
+    async def mock_upstream_dcr_post(url, headers, payload, timeout_seconds=10.0):
+        if url.endswith("/oidc/register"):
+            return 201, json.dumps({
+                "client_id": "tpc_auth0_upstream_verified_999",
+                "client_name": payload.get("client_name"),
+                "redirect_uris": payload.get("redirect_uris"),
+                "token_endpoint_auth_method": payload.get("token_endpoint_auth_method", "none"),
+                "response_types": ["code"],
+                "grant_types": ["authorization_code"],
+            })
+        return 404, "Not Found"
 
-    # Verify FastAPI redirect_slashes is explicitly False
-    assert_test(
-        getattr(app, "redirect_slashes", True) is False,
-        "FastAPI app initialized with redirect_slashes=False",
-    )
+    with patch("dcr._async_http_post", side_effect=mock_upstream_dcr_post):
+        dcr_req = MockRequest(
+            method="POST",
+            url="https://my-store-mcp.workers.dev/oauth/register",
+            headers={"cf-connecting-ip": "198.51.100.10", "content-type": "application/json"},
+            body=json.dumps(dcr_valid_payload),
+        )
+        dcr_res = await on_fetch(dcr_req, env)
+        assert_test(dcr_res.status == 201, "POST /oauth/register returns 201 Created")
+        dcr_json = json.loads(dcr_res.body)
 
-    # Test trailing slash tolerance: POST /oauth/register/ (with trailing slash)
-    # Must return 201 Created directly, without 307 Temporary Redirect (which strips body)
-    dcr_slash_req = MockRequest(
-        method="POST",
-        url="https://my-store-mcp.workers.dev/oauth/register/",
-        headers={"cf-connecting-ip": "198.51.100.13", "content-type": "application/json"},
-        body=json.dumps(dcr_valid_payload),
-    )
-    dcr_slash_res = await on_fetch(dcr_slash_req, env)
-    assert_test(
-        dcr_slash_res.status == 201,
-        "POST /oauth/register/ (with trailing slash) returns 201 directly without 307 redirect",
-    )
-    slash_json = json.loads(dcr_slash_res.body)
-    assert_test(
-        slash_json.get("client_id") is not None,
-        "Trailing slash POST retains request body and produces valid client_id",
-    )
+        assert_test(bool(dcr_json.get("client_id")), f"Contains valid client_id: {dcr_json.get('client_id')}")
+        assert_test(
+            dcr_json.get("redirect_uris") == dcr_valid_payload["redirect_uris"],
+            "Contains exact requested redirect_uris",
+        )
+        assert_test(
+            dcr_json.get("token_endpoint_auth_method") == "none",
+            "Contains 'token_endpoint_auth_method': 'none'",
+        )
+        assert_test(
+            dcr_json.get("response_types") == ["code"],
+            "CRITICAL: Contains 'response_types': ['code'] to prevent Claude parser crashes",
+        )
+        assert_test(
+            dcr_json.get("grant_types") == ["authorization_code"],
+            "CRITICAL: Contains 'grant_types': ['authorization_code']",
+        )
+
+        # Verify FastAPI redirect_slashes is explicitly False
+        assert_test(
+            getattr(app, "redirect_slashes", True) is False,
+            "FastAPI app initialized with redirect_slashes=False",
+        )
+
+        # Test trailing slash tolerance: POST /oauth/register/ (with trailing slash)
+        # Must return 201 Created directly, without 307 Temporary Redirect (which strips body)
+        dcr_slash_req = MockRequest(
+            method="POST",
+            url="https://my-store-mcp.workers.dev/oauth/register/",
+            headers={"cf-connecting-ip": "198.51.100.13", "content-type": "application/json"},
+            body=json.dumps(dcr_valid_payload),
+        )
+        dcr_slash_res = await on_fetch(dcr_slash_req, env)
+        assert_test(
+            dcr_slash_res.status == 201,
+            "POST /oauth/register/ (with trailing slash) returns 201 directly without 307 redirect",
+        )
+        slash_json = json.loads(dcr_slash_res.body)
+        assert_test(
+            slash_json.get("client_id") is not None,
+            "Trailing slash POST retains request body and produces valid client_id",
+        )
 
     # Test DCR invalid payload rejection (missing redirect_uris)
     dcr_bad_req = MockRequest(
@@ -425,118 +440,96 @@ async def run_all_tests():
     assert_test(dcr_malformed_res.status == 400, "Rejects malformed JSON body with 400 Bad Request")
 
     # -------------------------------------------------------------------------
-    # Test Automated Client Grant Creation via Auth0 Management API
+    # Test Pure Upstream Auth0 Dynamic Registration & Discovery Endpoints
     # -------------------------------------------------------------------------
-    from unittest.mock import patch
-    posted_grant_payload = {}
-    posted_grant_headers = {}
-    posted_token_payload = {}
-
-    async def mock_mgmt_http_post(url, headers, payload, timeout_seconds=10.0):
-        if url.endswith("/oauth/token"):
-            posted_token_payload.update(payload)
-            return 200, json.dumps({
-                "access_token": "mock_mgmt_api_token_abc123",
-                "expires_in": 86400,
-                "token_type": "Bearer",
-            })
-        elif url.endswith("/api/v2/client-grants"):
-            posted_grant_payload.update(payload)
-            posted_grant_headers.update(headers)
+    async def mock_auth0_dcr_endpoint(url, headers, payload, timeout_seconds=10.0):
+        if url.endswith("/oidc/register"):
             return 201, json.dumps({
-                "id": "cgr_test_12345",
-                "client_id": payload.get("client_id"),
-                "audience": payload.get("audience"),
-                "scope": payload.get("scope"),
+                "client_id": "auth0_dynamic_registered_client_888",
+                "client_name": payload.get("client_name"),
+                "redirect_uris": payload.get("redirect_uris"),
+                "token_endpoint_auth_method": "none",
+                "response_types": ["code"],
+                "grant_types": ["authorization_code"],
             })
         return 404, "Not Found"
 
-    with patch("dcr._async_http_post", side_effect=mock_mgmt_http_post):
-        # 1. Verify Management API token retrieval
-        token = await get_auth0_management_token(
-            auth0_domain,
-            m2m_client_id="m2m_test_client_id",
-            m2m_client_secret="m2m_test_client_secret",
-        )
-        assert_test(token == "mock_mgmt_api_token_abc123", "Management API token successfully retrieved")
-        assert_test(
-            posted_token_payload.get("audience") == f"{auth0_domain}/api/v2/",
-            f"Management token requested for audience {auth0_domain}/api/v2/",
-        )
-
-        # 2. Verify Client Grant creation with audience and scopes
-        grant_ok, grant_msg = await create_client_grant(
-            client_id="newly_created_client_777",
-            audience=auth0_audience,
-            auth_server_url=auth0_domain,
-            m2m_client_id="m2m_test_client_id",
-            m2m_client_secret="m2m_test_client_secret",
-            scope=["mcp:read", "mcp:write", "offline_access"],
-        )
-        assert_test(grant_ok is True, "Client Grant successfully created via Auth0 Management API")
-        assert_test(
-            posted_grant_payload.get("client_id") == "newly_created_client_777",
-            "Client Grant has correct client_id ('newly_created_client_777')",
-        )
-        assert_test(
-            posted_grant_payload.get("audience") == auth0_audience,
-            f"Client Grant has correct audience ('{auth0_audience}')",
-        )
-        assert_test(
-            posted_grant_payload.get("scope") == ["mcp:read", "mcp:write", "offline_access"],
-            "Client Grant has correct scopes ['mcp:read', 'mcp:write', 'offline_access']",
-        )
-        assert_test(
-            posted_grant_headers.get("Authorization") == "Bearer mock_mgmt_api_token_abc123",
-            "Client Grant request includes Bearer Management API token",
-        )
-
-        # 3. Verify Client Grant HTTP 409 Conflict handled gracefully (already granted)
-        async def mock_conflict_http_post(url, headers, payload, timeout_seconds=10.0):
-            if url.endswith("/oauth/token"):
-                return 200, json.dumps({"access_token": "mock_token", "expires_in": 3600})
-            elif url.endswith("/api/v2/client-grants"):
-                return 409, json.dumps({"error": "Conflict", "message": "A client grant for this client and audience already exists"})
-            return 404, "Not Found"
-
-        with patch("dcr._async_http_post", side_effect=mock_conflict_http_post):
-            grant_conflict_ok, _ = await create_client_grant(
-                client_id="existing_client_888",
-                audience=auth0_audience,
-                auth_server_url=auth0_domain,
-                m2m_client_id="m2m_test_client_id",
-                m2m_client_secret="m2m_test_client_secret",
-            )
-            assert_test(grant_conflict_ok is True, "Client Grant HTTP 409 Conflict handled gracefully as already granted")
-
-        # 4. Verify full DCR registration with M2M credentials returns 201 Created and response_types: ["code"]
-        env_with_m2m = MockEnv(
-            WOOCOMMERCE_STORE_URL="https://dev-anythingstore37.pantheonsite.io",
-            WOOCOMMERCE_CONSUMER_KEY="ck_test",
-            WOOCOMMERCE_CONSUMER_SECRET="cs_test",
-            OAUTH_AUTH_SERVER_URL=auth0_domain,
-            OAUTH_JWKS_URL=f"{auth0_domain}/.well-known/jwks.json",
-            OAUTH_ISSUER=auth0_issuer,
-            OAUTH_AUDIENCE=auth0_audience,
-            AUTH0_M2M_CLIENT_ID="m2m_test_client_id",
-            AUTH0_M2M_CLIENT_SECRET="m2m_test_client_secret",
-        )
-        dcr_m2m_req = MockRequest(
+    with patch("dcr._async_http_post", side_effect=mock_auth0_dcr_endpoint):
+        dcr_dyn_req = MockRequest(
             method="POST",
             url="https://my-store-mcp.workers.dev/oauth/register",
             headers={"cf-connecting-ip": "198.51.100.20", "content-type": "application/json"},
             body=json.dumps({
-                "client_name": "Claude Desktop Automated Grant",
+                "client_name": "Claude Desktop Dynamic Client",
                 "redirect_uris": ["http://localhost:5173/callback"],
             }),
         )
-        dcr_m2m_res = await on_fetch(dcr_m2m_req, env_with_m2m)
-        assert_test(dcr_m2m_res.status == 201, "DCR registration with automated Client Grant returns 201 Created")
-        dcr_m2m_json = json.loads(dcr_m2m_res.body)
+        dcr_dyn_res = await on_fetch(dcr_dyn_req, env)
+        assert_test(dcr_dyn_res.status == 201, "Pure dynamic registration returns 201 Created from Auth0")
+        dcr_dyn_json = json.loads(dcr_dyn_res.body)
         assert_test(
-            dcr_m2m_json.get("response_types") == ["code"],
+            dcr_dyn_json.get("client_id") == "auth0_dynamic_registered_client_888",
+            "Returns newly provisioned dynamic client ID from Auth0",
+        )
+        assert_test(
+            dcr_dyn_json.get("token_endpoint_auth_method") == "none",
+            "Dynamic client has token_endpoint_auth_method 'none'",
+        )
+        assert_test(
+            dcr_dyn_json.get("response_types") == ["code"],
             "Response strictly contains 'response_types': ['code']",
         )
+        assert_test(
+            dcr_dyn_json.get("grant_types") == ["authorization_code"],
+            "Response strictly contains 'grant_types': ['authorization_code']",
+        )
+
+    # 2. Verify RFC 8414 Authorization Server Metadata points directly to Auth0
+    as_meta_req = MockRequest(
+        method="GET",
+        url="https://my-store-mcp.workers.dev/.well-known/oauth-authorization-server",
+        headers={"cf-connecting-ip": "198.51.100.21"},
+    )
+    as_meta_res = await on_fetch(as_meta_req, env)
+    assert_test(as_meta_res.status == 200, "GET /.well-known/oauth-authorization-server returns 200")
+    as_meta_json = json.loads(as_meta_res.body)
+    assert_test(
+        as_meta_json.get("authorization_endpoint") == f"{auth0_domain}/authorize",
+        f"Authorization endpoint points directly to Auth0 login: {as_meta_json.get('authorization_endpoint')}",
+    )
+    assert_test(
+        as_meta_json.get("token_endpoint") == f"{auth0_domain}/oauth/token",
+        f"Token endpoint points directly to Auth0: {as_meta_json.get('token_endpoint')}",
+    )
+
+    # 3. Verify worker forwards /oauth/authorize directly to Auth0 Universal Login
+    auth_fwd_req = MockRequest(
+        method="GET",
+        url="https://my-store-mcp.workers.dev/oauth/authorize?client_id=123&response_type=code",
+        headers={"cf-connecting-ip": "198.51.100.22"},
+    )
+    auth_fwd_res = await on_fetch(auth_fwd_req, env)
+    assert_test(auth_fwd_res.status == 302, "GET /oauth/authorize redirects with 302")
+    location_hdr = [v for k, v in auth_fwd_res.headers if k.lower() == "location"][0]
+    assert_test(
+        location_hdr.startswith(f"{auth0_domain}/authorize"),
+        f"Redirects to Auth0 Universal Login page: {location_hdr}",
+    )
+
+    # 4. Verify worker /oauth/token rejects direct exchange and directs to Auth0
+    token_direct_req = MockRequest(
+        method="POST",
+        url="https://my-store-mcp.workers.dev/oauth/token",
+        headers={"cf-connecting-ip": "198.51.100.23", "content-type": "application/json"},
+        body=json.dumps({"grant_type": "authorization_code"}),
+    )
+    token_direct_res = await on_fetch(token_direct_req, env)
+    assert_test(token_direct_res.status == 400, "POST /oauth/token on worker returns 400")
+    token_err_json = json.loads(token_direct_res.body)
+    assert_test(
+        "auth0 token endpoint" in token_err_json.get("error_description", "").lower(),
+        "Directs client to Auth0 token endpoint",
+    )
 
     # -------------------------------------------------------------------------
     # TEST 7: IP-Based Rate Limiting on Discovery Endpoint & DCR
@@ -695,8 +688,100 @@ async def run_all_tests():
     for code in [400, 401, 403, 404, 422]:
         assert_test(not wc_client.is_transient_error(code), f"HTTP {code} is classified as permanent")
 
+    # -------------------------------------------------------------------------
+    # TEST 14: Live Cloudflare Worker Dev Server Execution (npx wrangler dev)
+    # -------------------------------------------------------------------------
+    print_test_header(14, "Live Cloudflare Worker Execution (npx wrangler dev)")
+    import shutil
+    import subprocess
+    import urllib.request
+
+    wrangler_cmd = shutil.which("wrangler") or shutil.which("npx")
+    if not wrangler_cmd:
+        print(f"   {YELLOW}⚠ SKIP: 'wrangler' / 'npx' not installed in PATH.{RESET}")
+    else:
+        cmd = ["npx", "wrangler", "dev", "--port", "8787", "--ip", "127.0.0.1"]
+        pkg_dir = os.path.dirname(os.path.abspath(__file__))
+        print("   Starting local Cloudflare Worker via 'npx wrangler dev'...")
+        proc = subprocess.Popen(
+            cmd,
+            cwd=pkg_dir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            preexec_fn=os.setsid if hasattr(os, "setsid") else None,
+        )
+
+        try:
+            # Poll for worker readiness (up to 15 seconds)
+            ready = False
+            base_worker_url = "http://127.0.0.1:8787"
+            for _ in range(30):
+                await asyncio.sleep(0.5)
+                if proc.poll() is not None:
+                    # Process died prematurely
+                    stderr_out = proc.stderr.read().decode("utf-8", errors="replace")
+                    break
+                try:
+                    req = urllib.request.Request(f"{base_worker_url}/.well-known/oauth-protected-resource")
+                    with urllib.request.urlopen(req, timeout=1.0) as resp:
+                        if resp.status == 200:
+                            ready = True
+                            break
+                except Exception:
+                    pass
+
+            assert_test(ready, "Cloudflare Worker compiled and ready via 'npx wrangler dev'")
+
+            if ready:
+                # 1. Test RFC 9728 endpoint on live worker
+                req = urllib.request.Request(f"{base_worker_url}/.well-known/oauth-protected-resource")
+                with urllib.request.urlopen(req, timeout=3.0) as resp:
+                    assert_test(resp.status == 200, "Live Worker: GET /.well-known/oauth-protected-resource returns 200")
+                    live_meta = json.loads(resp.read().decode("utf-8"))
+                    assert_test(live_meta.get("resource") == base_worker_url, f"Live Worker: dynamic resource is '{base_worker_url}'")
+                    assert_test(live_meta.get("registration_endpoint") == f"{base_worker_url}/oauth/register", "Live Worker: registration_endpoint dynamically points to /oauth/register")
+                    assert_test("mcp:read" in live_meta.get("scopes_supported", []), "Live Worker: scopes include 'mcp:read'")
+
+                # 2. Test unauthenticated /mcp endpoint (must return HTTP 401 with WWW-Authenticate)
+                mcp_req = urllib.request.Request(
+                    f"{base_worker_url}/mcp",
+                    data=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                try:
+                    with urllib.request.urlopen(mcp_req, timeout=3.0) as resp:
+                        pass
+                except urllib.error.HTTPError as err:
+                    assert_test(err.code == 401, "Live Worker: Unauthenticated POST /mcp returns 401")
+                    www_auth = err.headers.get("WWW-Authenticate", "")
+                    assert_test(f'resource_metadata="{base_worker_url}/.well-known/oauth-protected-resource"' in www_auth, f"Live Worker: WWW-Authenticate header contains dynamic resource_metadata: {www_auth}")
+
+                # 3. Test RFC 8414 Authorization Server Metadata on live worker
+                as_req = urllib.request.Request(f"{base_worker_url}/.well-known/oauth-authorization-server")
+                with urllib.request.urlopen(as_req, timeout=3.0) as resp:
+                    assert_test(resp.status == 200, "Live Worker: GET /.well-known/oauth-authorization-server returns 200")
+                    as_meta = json.loads(resp.read().decode("utf-8"))
+                    assert_test(as_meta.get("registration_endpoint") == f"{base_worker_url}/oauth/register", "Live Worker: DCR endpoint dynamically advertised")
+                    assert_test(as_meta.get("response_types_supported") == ["code"], "Live Worker: Advertises response_types ['code']")
+
+        finally:
+            # Cleanly shutdown the wrangler dev server process group
+            try:
+                import signal
+                if hasattr(os, "killpg") and hasattr(os, "getpgid"):
+                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                else:
+                    proc.terminate()
+                proc.wait(timeout=3)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+
     print(f"\n{GREEN}{'='*70}")
-    print("   ALL 13 DCR PROXY & DUAL-LAYER RATE LIMITING TESTS PASSED!     ")
+    print("   ALL 14 DCR PROXY, RATE LIMITING & LIVE WORKER TESTS PASSED!   ")
     print(f"{'='*70}{RESET}\n")
 
 

@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test": "python3 woocommerce_mcp/test_mcp.py",
+    "worker": "wrangler dev --config woocommerce_mcp/wrangler.toml --port 8787 --ip 127.0.0.1"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
@@ -29,6 +31,7 @@
     "esbuild": "^0.25.0",
     "tailwindcss": "^4.3.3",
     "tsx": "^4.21.0",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "wrangler": "^4.147.0"
   }
 }
