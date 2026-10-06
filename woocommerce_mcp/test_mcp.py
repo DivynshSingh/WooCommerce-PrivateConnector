@@ -268,8 +268,12 @@ async def run_all_tests():
     )
 
     prods = await mock_client.list_products(page=1, per_page=100)
-    assert_test(len(prods) == 1, "Async list_products succeeded")
-    assert_test("per_page=15" in captured_urls[-1], "Clamps per_page=100 down to per_page=15 max")
+    assert_test(len(prods["products"]) == 1, "Async list_products succeeded")
+    assert_test("per_page=100" in captured_urls[-1], "Honors per_page=100 up to WooCommerce max 100")
+
+    captured_urls.clear()
+    await mock_client.list_products(page=1, per_page=150)
+    assert_test("per_page=100" in captured_urls[-1], "Clamps per_page=150 down to per_page=100 max")
 
     captured_urls.clear()
     await mock_client.list_orders()
@@ -780,8 +784,650 @@ async def run_all_tests():
                 except Exception:
                     pass
 
+    # -------------------------------------------------------------------------
+    # TEST 15: BUG-1 Per-Type Product Creation & Validation
+    # -------------------------------------------------------------------------
+    print_test_header(15, "BUG-1: Per-Type Product Creation & Validation")
+
+    # Mock client for tool execution tests
+    captured_payloads = []
+
+    class MockToolWCClient(WooCommerceClient):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.simulate_missing_gateway = False
+            self.grouped_parent_children = [53, 52]
+
+        async def _async_http_call(self, url, method, headers, body=None):
+            payload = json.loads(body) if body else {}
+            captured_payloads.append({"url": url, "method": method, "payload": payload})
+            # Return appropriate simulated response based on endpoint
+            if "variations" in url and method == "GET":
+                return 200, json.dumps([{"id": 101, "price": "10.00", "regular_price": "10.00"}]), {"x-wp-total": "1", "x-wp-totalpages": "1"}
+            elif "variations" in url and method == "POST":
+                return 201, json.dumps({"id": 102, "regular_price": payload.get("regular_price"), "attributes": payload.get("attributes", [])}), {}
+            elif "variations" in url and method == "PUT":
+                return 200, json.dumps({"id": 102, "regular_price": payload.get("regular_price")}), {}
+            elif "variations" in url and method == "DELETE":
+                return 200, json.dumps({"id": 102}), {}
+            elif "categories/batch" in url and method == "POST":
+                return 200, json.dumps({
+                    "create": payload.get("create", []),
+                    "update": payload.get("update", []),
+                    "delete": payload.get("delete", []),
+                }), {}
+            elif "categories" in url and method == "GET":
+                return 200, json.dumps([{"id": 19, "name": "Apparel", "slug": "apparel", "count": 5}]), {"x-wp-total": "1", "x-wp-totalpages": "1"}
+            elif "categories" in url and method == "POST":
+                return 201, json.dumps({"id": 20, "name": payload.get("name"), "slug": "new-cat"}), {}
+            elif "categories" in url and method == "PUT":
+                return 200, json.dumps({"id": 19, "name": payload.get("name", "Apparel"), "slug": payload.get("slug", "apparel")}), {}
+            elif "categories" in url and method == "DELETE":
+                return 200, json.dumps({"id": 19}), {}
+            elif "refunds" in url and method == "POST":
+                if payload.get("api_refund", True) is True and self.simulate_missing_gateway:
+                    return 400, json.dumps({
+                        "code": "woocommerce_rest_cannot_create_order_refund",
+                        "message": "The payment gateway for this order does not exist."
+                    }), {}
+                return 201, json.dumps({
+                    "id": 501,
+                    "amount": payload.get("amount"),
+                    "reason": payload.get("reason", ""),
+                    "api_refund": payload.get("api_refund", True)
+                }), {}
+            elif "orders" in url and method == "GET":
+                return 200, json.dumps({
+                    "id": 301,
+                    "number": "301",
+                    "status": "completed",
+                    "total": "50.00",
+                    "refunds": [],
+                    "line_items": [{"id": 1, "product_id": 99, "quantity": 2, "total": "50.00"}]
+                }), {}
+            elif "orders" in url and method == "POST":
+                return 201, json.dumps({"id": 301, "status": payload.get("status", "pending"), "line_items": payload.get("line_items", [])}), {}
+            elif "orders" in url and method == "PUT":
+                return 200, json.dumps({"id": 301, "status": payload.get("status")}), {}
+            elif "orders" in url and method == "DELETE":
+                return 200, json.dumps({"id": 301, "status": "trash"}), {}
+            elif "type=grouped" in url and method == "GET":
+                return 200, json.dumps([{
+                    "id": 54,
+                    "name": "Grouped Parent 54",
+                    "type": "grouped",
+                    "status": "trash" if "status=trash" in url else "publish",
+                    "grouped_products": list(self.grouped_parent_children),
+                }]), {}
+            elif "products/54" in url and method == "PUT":
+                self.grouped_parent_children = payload.get("grouped_products", [])
+                return 200, json.dumps({
+                    "id": 54,
+                    "name": "Grouped Parent 54",
+                    "type": "grouped",
+                    "grouped_products": list(self.grouped_parent_children),
+                }), {}
+            elif "products/54" in url and method == "GET":
+                return 200, json.dumps({
+                    "id": 54,
+                    "name": "Grouped Parent 54",
+                    "type": "grouped",
+                    "grouped_products": [53, 52], # contains deleted 53 to verify safety net
+                }), {}
+            elif "products/53" in url and method == "DELETE":
+                return 200, json.dumps({"id": 53, "name": "Child B"}), {}
+            elif "products/53" in url and method == "GET":
+                return 404, json.dumps({"code": "woocommerce_rest_product_invalid_id", "message": "Invalid product ID."}), {}
+            elif "products/52" in url and method == "GET":
+                return 200, json.dumps({"id": 52, "name": "Child A", "type": "simple"}), {}
+            elif method == "DELETE":
+                return 200, json.dumps({"id": 99, "name": "Test Product"}), {}
+            else:
+                resp_obj = {
+                    "id": 99,
+                    "name": payload.get("name", "Product 99"),
+                    "type": payload.get("type", "simple"),
+                    "regular_price": payload.get("regular_price", "19.99"),
+                    "description": payload.get("description", "<p>Sample description</p>"),
+                    "short_description": payload.get("short_description", "<p>Short desc</p>"),
+                    "stock_quantity": payload.get("stock_quantity", 10),
+                    "stock_status": payload.get("stock_status", "instock"),
+                    "manage_stock": payload.get("manage_stock", False),
+                    "categories": payload.get("categories", [{"id": 19, "name": "Apparel", "slug": "apparel"}]),
+                    "external_url": payload.get("external_url", ""),
+                    "button_text": payload.get("button_text", ""),
+                    "grouped_products": payload.get("grouped_products", []),
+                    "attributes": payload.get("attributes", []),
+                }
+                return 200, json.dumps(resp_obj), {}
+
+    tool_client = MockToolWCClient(
+        store_url="https://mock-store.example.com",
+        consumer_key="ck_test",
+        consumer_secret="cs_test",
+    )
+
+    # 1. External type without external_url is rejected
+    val_ok, val_err = validate_input("create_product", {"name": "E-Book", "type": "external"})
+    assert_test(not val_ok and "external_url" in val_err, "BUG-1: Rejects external product missing external_url")
+
+    # 2. External type with external_url succeeds and forwards type & external_url
+    captured_payloads.clear()
+    ext_res = await execute_tool("create_product", {
+        "name": "E-Book",
+        "type": "external",
+        "external_url": "https://external.example.com/item",
+        "button_text": "Buy on Partner",
+    }, tool_client)
+    assert_test(ext_res["isError"] is False, "BUG-1: External product creates successfully")
+    assert_test(captured_payloads[-1]["payload"].get("type") == "external", "BUG-1: Forwards 'type': 'external' to WooCommerce")
+    assert_test(captured_payloads[-1]["payload"].get("external_url") == "https://external.example.com/item", "BUG-1: Forwards external_url")
+
+    # 3. Grouped type without grouped_products is rejected
+    val_ok, val_err = validate_input("create_product", {"name": "Bundle", "type": "grouped"})
+    assert_test(not val_ok and "grouped_products" in val_err, "BUG-1: Rejects grouped product missing grouped_products")
+
+    # 4. Grouped type with grouped_products succeeds and forwards list
+    captured_payloads.clear()
+    grp_res = await execute_tool("create_product", {
+        "name": "Bundle",
+        "type": "grouped",
+        "grouped_products": [10, 11, 12],
+    }, tool_client)
+    assert_test(grp_res["isError"] is False, "BUG-1: Grouped product creates successfully")
+    assert_test(captured_payloads[-1]["payload"].get("type") == "grouped", "BUG-1: Forwards 'type': 'grouped' to WooCommerce")
+    assert_test(captured_payloads[-1]["payload"].get("grouped_products") == [10, 11, 12], "BUG-1: Forwards grouped_products list")
+
+    # 5. Variable type without attributes is rejected
+    val_ok, val_err = validate_input("create_product", {"name": "T-Shirt", "type": "variable"})
+    assert_test(not val_ok and "attributes" in val_err, "BUG-1: Rejects variable product missing attributes")
+
+    # 6. Variable type with attributes succeeds and forwards attributes
+    captured_payloads.clear()
+    var_res = await execute_tool("create_product", {
+        "name": "T-Shirt",
+        "type": "variable",
+        "attributes": [{"name": "Size", "options": ["S", "M", "L"]}],
+    }, tool_client)
+    assert_test(var_res["isError"] is False, "BUG-1: Variable product creates successfully")
+    assert_test(captured_payloads[-1]["payload"].get("type") == "variable", "BUG-1: Forwards 'type': 'variable' to WooCommerce")
+
+    # -------------------------------------------------------------------------
+    # TEST 16: BUG-2 & BUG-3 Stock Validation & Warnings
+    # -------------------------------------------------------------------------
+    print_test_header(16, "BUG-2 & BUG-3: Stock Validation & Warnings")
+
+    # 1. Negative stock without backorders is rejected
+    val_ok, val_err = validate_input("update_product_stock", {"product_id": 99, "stock_quantity": -5})
+    assert_test(not val_ok and "cannot be negative" in val_err, "BUG-2: Rejects negative stock_quantity without backorders")
+
+    # 2. Negative stock with backorders='yes' is permitted
+    val_ok, val_err = validate_input("update_product_stock", {"product_id": 99, "stock_quantity": -5, "backorders": "yes"})
+    assert_test(val_ok, "BUG-2: Allows negative stock_quantity when backorders='yes'")
+
+    # 3. Negative stock in update_product without backorders is rejected
+    val_ok, val_err = validate_input("update_product", {"product_id": 99, "stock_quantity": -1})
+    assert_test(not val_ok and "cannot be negative" in val_err, "BUG-2: Rejects negative stock in update_product without backorders")
+
+    # 4. Stock status 'onbackorder' with 0 stock and backorders='no' generates a warning (BUG-3)
+    resp = await execute_tool("update_product_stock", {
+        "product_id": 99,
+        "stock_quantity": 0,
+        "stock_status": "onbackorder",
+        "backorders": "no",
+    }, tool_client)
+    assert_test(resp["isError"] is False, "BUG-3: Tool executes without failure")
+    parsed_res = json.loads(resp["content"][0]["text"])
+    assert_test("warnings" in parsed_res and len(parsed_res["warnings"]) > 0, "BUG-3: Response contains warnings array")
+    assert_test("onbackorder" in parsed_res["warnings"][0], "BUG-3: Warning explains backorders limitation")
+
+    # -------------------------------------------------------------------------
+    # TEST 17: BUG-4 Description Normalization & BUG-5 Search SKU
+    # -------------------------------------------------------------------------
+    print_test_header(17, "BUG-4 & BUG-5: Description Normalization & Search SKU")
+
+    # 1. Clean HTML wrapping from descriptions
+    formatted = tool_client._format_product({
+        "id": 1,
+        "name": "Item",
+        "description": "<p>Clean description text.</p>",
+        "short_description": "<p>Clean short text.</p>",
+    })
+    assert_test(formatted["description"] == "Clean description text.", "BUG-4: Strips wrapping <p> tags from description")
+    assert_test(formatted["short_description"] == "Clean short text.", "BUG-4: Strips wrapping <p> tags from short_description")
+
+    # Plain text remains unaltered
+    formatted_plain = tool_client._format_product({
+        "id": 2,
+        "name": "Item 2",
+        "description": "Already plain text.",
+    })
+    assert_test(formatted_plain["description"] == "Already plain text.", "BUG-4: Leaves plain text descriptions clean")
+
+    # 2. Search tool accepts 'sku' parameter and documents category filter
+    search_tool_def = next(t for t in get_tool_definitions() if t["name"] == "search_products")
+    assert_test("sku" in search_tool_def["inputSchema"]["properties"], "BUG-5: search_products accepts 'sku' filter")
+    assert_test("category" in search_tool_def["description"].lower(), "BUG-5: Documentation clarifies category filter")
+
+    # -------------------------------------------------------------------------
+    # TEST 18: FEAT-1 delete_product, FEAT-2 update_product, FEAT-3 create_product categories
+    # -------------------------------------------------------------------------
+    print_test_header(18, "FEAT-1 to FEAT-3: delete_product, update_product, categories")
+
+    # 1. delete_product metadata contains destructiveHint
+    del_tool_def = next(t for t in get_tool_definitions() if t["name"] == "delete_product")
+    assert_test(del_tool_def.get("destructiveHint") is True, "FEAT-1: delete_product has destructiveHint: True")
+
+    # 2. delete_product with force=False moves to trash
+    captured_payloads.clear()
+    del_trash = await execute_tool("delete_product", {"product_id": 99, "force": False}, tool_client)
+    assert_test(del_trash["isError"] is False, "FEAT-1: delete_product (trash) succeeds")
+    assert_test(json.loads(del_trash["content"][0]["text"]).get("status") == "trash", "FEAT-1: Trash operation returns status='trash'")
+
+    # 3. delete_product with force=True permanently deletes
+    del_force = await execute_tool("delete_product", {"product_id": 99, "force": True}, tool_client)
+    assert_test(json.loads(del_force["content"][0]["text"]).get("status") == "deleted", "FEAT-1: Force delete returns status='deleted'")
+
+    # 4. update_product general edit
+    captured_payloads.clear()
+    upd_res = await execute_tool("update_product", {
+        "product_id": 99,
+        "name": "Updated Jacket",
+        "regular_price": "89.99",
+        "sale_price": "69.99",
+        "categories": [19, 25],
+        "status": "publish",
+    }, tool_client)
+    assert_test(upd_res["isError"] is False, "FEAT-2: update_product succeeds")
+    upd_payload = captured_payloads[-1]["payload"]
+    assert_test(upd_payload.get("name") == "Updated Jacket", "FEAT-2: Updates name")
+    assert_test(upd_payload.get("regular_price") == "89.99", "FEAT-2: Updates price")
+    assert_test(upd_payload.get("categories") == [{"id": 19}, {"id": 25}], "FEAT-2: Updates categories")
+
+    # 5. create_product with categories (FEAT-3)
+    captured_payloads.clear()
+    create_cat_res = await execute_tool("create_product", {
+        "name": "Hoodie",
+        "categories": [19],
+        "sale_price": "39.99",
+        "featured": True,
+    }, tool_client)
+    assert_test(create_cat_res["isError"] is False, "FEAT-3: create_product with categories succeeds")
+    create_payload = captured_payloads[-1]["payload"]
+    assert_test(create_payload.get("categories") == [{"id": 19}], "FEAT-3: Sets category IDs in WooCommerce payload")
+    assert_test(create_payload.get("sale_price") == "39.99", "FEAT-3: Sets sale_price")
+    assert_test(create_payload.get("featured") is True, "FEAT-3: Sets featured")
+
+    # -------------------------------------------------------------------------
+    # TEST 19: FEAT-4 Variations, FEAT-5 Categories, FEAT-6 Orders & Refunds
+    # -------------------------------------------------------------------------
+    print_test_header(19, "FEAT-4 to FEAT-6: Variations, Categories, Orders & Refunds")
+
+    # 1. Variations CRUD
+    v_list = await execute_tool("list_variations", {"product_id": 99}, tool_client)
+    assert_test(v_list["isError"] is False, "FEAT-4: list_variations succeeds")
+
+    v_create = await execute_tool("create_variation", {
+        "product_id": 99,
+        "regular_price": "25.00",
+        "attributes": [{"name": "Size", "option": "XL"}],
+    }, tool_client)
+    assert_test(v_create["isError"] is False, "FEAT-4: create_variation succeeds")
+
+    v_update = await execute_tool("update_variation", {
+        "product_id": 99,
+        "variation_id": 102,
+        "regular_price": "28.00",
+    }, tool_client)
+    assert_test(v_update["isError"] is False, "FEAT-4: update_variation succeeds")
+
+    del_var_def = next(t for t in get_tool_definitions() if t["name"] == "delete_variation")
+    assert_test(del_var_def.get("destructiveHint") is True, "FEAT-4: delete_variation has destructiveHint: True")
+
+    v_del = await execute_tool("delete_variation", {"product_id": 99, "variation_id": 102}, tool_client)
+    assert_test(v_del["isError"] is False, "FEAT-4: delete_variation succeeds")
+
+    # 2. Categories
+    cat_list = await execute_tool("list_categories", {}, tool_client)
+    assert_test(cat_list["isError"] is False, "FEAT-5: list_categories succeeds")
+
+    cat_create = await execute_tool("create_category", {"name": "Footwear", "description": "Shoes & Boots"}, tool_client)
+    assert_test(cat_create["isError"] is False, "FEAT-5: create_category succeeds")
+
+    # 3. Orders & Refunds
+    order_create = await execute_tool("create_order", {
+        "line_items": [{"product_id": 99, "quantity": 2}],
+        "status": "processing",
+        "customer_note": "Please gift wrap.",
+    }, tool_client)
+    assert_test(order_create["isError"] is False, "FEAT-6: create_order succeeds")
+
+    order_upd = await execute_tool("update_order_status", {"order_id": 301, "status": "completed"}, tool_client)
+    assert_test(order_upd["isError"] is False, "FEAT-6: update_order_status succeeds")
+
+    ref_def = next(t for t in get_tool_definitions() if t["name"] == "create_refund")
+    assert_test(ref_def.get("destructiveHint") is True, "FEAT-6: create_refund has destructiveHint: True")
+
+    refund_res = await execute_tool("create_refund", {"order_id": 301, "amount": "15.00", "reason": "Customer return"}, tool_client)
+    assert_test(refund_res["isError"] is False, "FEAT-6: create_refund succeeds")
+
+    # 4. Verify read-only annotations across reader tools
+    read_only_tools = ["search_products", "get_product", "list_products", "list_orders", "get_order", "list_variations", "list_categories"]
+    for r_name in read_only_tools:
+        r_def = next(t for t in get_tool_definitions() if t["name"] == r_name)
+        assert_test(r_def.get("readOnlyHint") is True, f"Non-functional: '{r_name}' marked readOnlyHint: True")
+
+    # -------------------------------------------------------------------------
+    # TEST 20: R1 Refunds on Orders with No Payment Gateway & Validation
+    # -------------------------------------------------------------------------
+    print_test_header(20, "R1: Refunds on Orders with No Gateway & Amount Validation")
+
+    # 1. Successful refund with api_refund=False on order with no gateway
+    captured_payloads.clear()
+    r1_success = await execute_tool("create_refund", {
+        "order_id": 301,
+        "amount": "5.00",
+        "reason": "Customer manual refund",
+        "api_refund": False,
+    }, tool_client)
+    assert_test(r1_success["isError"] is False, "R1: create_refund with api_refund=false succeeds")
+    r1_parsed = json.loads(r1_success["content"][0]["text"])
+    assert_test(r1_parsed.get("id") == 501, "R1: Returns refund ID")
+    assert_test(r1_parsed.get("refund_amount") == "5.00", "R1: Returns refund amount")
+    assert_test(r1_parsed.get("order_status") == "completed", "R1: Returns updated order_status")
+    assert_test(r1_parsed.get("order_original_total") == "50.00", "R1: Returns updated order_total")
+    r1_post_payload = next(cp["payload"] for cp in captured_payloads if "refunds" in cp["url"])
+    assert_test(r1_post_payload.get("api_refund") is False, "R1: Forwards api_refund=false to WooCommerce")
+
+    # 2. Refund with default api_refund=True fails with improved error message when gateway missing
+    tool_client.simulate_missing_gateway = True
+    r1_fail = await execute_tool("create_refund", {
+        "order_id": 301,
+        "amount": "5.00",
+        "reason": "Missing gateway test",
+    }, tool_client)
+    tool_client.simulate_missing_gateway = False
+    assert_test(r1_fail["isError"] is True, "R1: Default call without gateway fails")
+    r1_fail_text = r1_fail["content"][0]["text"]
+    assert_test(
+        "api_refund=false" in r1_fail_text and "payment gateway" in r1_fail_text.lower(),
+        "R1: Error message directs user to retry with api_refund=false for manual refund"
+    )
+
+    # 3. Refund greater than remaining refundable amount returns clear validation error
+    r1_excessive = await execute_tool("create_refund", {
+        "order_id": 301,
+        "amount": "100.00",
+        "reason": "Excessive amount",
+    }, tool_client)
+    assert_test(r1_excessive["isError"] is True, "R1: Excessive refund rejected")
+    assert_test("exceeds the remaining refundable amount" in r1_excessive["content"][0]["text"], "R1: Clear validation error on excessive refund")
+
+    # 4. Optional line_items and restock_items forwarded
+    captured_payloads.clear()
+    r1_line_items = await execute_tool("create_refund", {
+        "order_id": 301,
+        "amount": "10.00",
+        "api_refund": False,
+        "line_items": [{"id": 1, "quantity": 1, "refund_total": "10.00"}],
+        "restock_items": True,
+    }, tool_client)
+    assert_test(r1_line_items["isError"] is False, "R1: Refund with line_items & restock_items succeeds")
+    r1_refund_payload = next(cp["payload"] for cp in captured_payloads if "refunds" in cp["url"])
+    assert_test(r1_refund_payload.get("line_items") == [{"id": 1, "quantity": 1, "refund_total": "10.00"}], "R1: Forwards line_items")
+    assert_test(r1_refund_payload.get("restock_items") is True, "R1: Forwards restock_items=true")
+
+    # -------------------------------------------------------------------------
+    # TEST 21: R2 Order Trashing & Tool Enums Audit
+    # -------------------------------------------------------------------------
+    print_test_header(21, "R2: Order Trashing via DELETE Endpoint & Enums Audit")
+
+    # 1. Trashing an order calls delete endpoint with force=false and returns status='trash'
+    captured_payloads.clear()
+    r2_trash_res = await execute_tool("update_order_status", {
+        "order_id": 301,
+        "status": "trash",
+    }, tool_client)
+    assert_test(r2_trash_res["isError"] is False, "R2: update_order_status with status='trash' succeeds")
+    r2_trash_parsed = json.loads(r2_trash_res["content"][0]["text"])
+    assert_test(r2_trash_parsed.get("status") == "trash", "R2: Trashed order has status='trash'")
+    assert_test(captured_payloads[-1]["method"] == "DELETE", "R2: Trashing calls DELETE endpoint")
+    assert_test("force=false" in captured_payloads[-1]["url"], "R2: DELETE endpoint called with force=false")
+
+    # 2. list_orders with status='any' does not return trashed orders
+    class TrashedOrderWCClient(WooCommerceClient):
+        async def _async_http_call(self, url, method, headers, body=None):
+            return 200, json.dumps([
+                {"id": 301, "status": "trash", "total": "50.00"},
+                {"id": 302, "status": "completed", "total": "25.00"},
+            ]), {}
+
+    trash_test_client = TrashedOrderWCClient(
+        store_url="https://mock.example.com",
+        consumer_key="ck_test",
+        consumer_secret="cs_test",
+    )
+    r2_list = await execute_tool("list_orders", {"status": "any"}, trash_test_client)
+    assert_test(r2_list["isError"] is False, "R2: list_orders succeeds")
+    r2_parsed = json.loads(r2_list["content"][0]["text"])
+    r2_orders = r2_parsed.get("orders", r2_parsed if isinstance(r2_parsed, list) else [])
+    assert_test(all(o["status"] != "trash" for o in r2_orders), "R2: Trashed order does not appear under list_orders with status=any")
+
+    # 3. Audit all tool enums against executable WooCommerce operations
+    all_tools = get_tool_definitions()
+    for tool_def in all_tools:
+        props = tool_def.get("inputSchema", {}).get("properties", {})
+        for prop_name, prop_spec in props.items():
+            if "enum" in prop_spec:
+                enum_vals = prop_spec["enum"]
+                assert_test(len(enum_vals) > 0, f"R2 Audit: Tool '{tool_def['name']}' parameter '{prop_name}' has non-empty enum {enum_vals}")
+
+    # -------------------------------------------------------------------------
+    # TEST 22: R3 Grouped Products Reference Cleanup & Safety Net
+    # -------------------------------------------------------------------------
+    print_test_header(22, "R3: Grouped Products Reference Cleanup & Safety Net")
+
+    # 1. Permanently deleting child 53 removes it from grouped parent 54
+    tool_client.grouped_parent_children = [53, 52]
+    captured_payloads.clear()
+    r3_del_child = await execute_tool("delete_product", {
+        "product_id": 53,
+        "force": True,
+    }, tool_client)
+    assert_test(r3_del_child["isError"] is False, "R3: Permanently delete child product 53 succeeds")
+    r3_del_parsed = json.loads(r3_del_child["content"][0]["text"])
+    assert_test(r3_del_parsed.get("updated_grouped_parents") == [54], "R3: delete response lists grouped parent [54] as updated")
+    assert_test(tool_client.grouped_parent_children == [52], "R3: Child 53 removed from parent 54 grouped_products")
+
+    # 2. Deleting a product that belongs to no grouped parents reports updated_grouped_parents: []
+    r3_del_solo = await execute_tool("delete_product", {
+        "product_id": 99,
+        "force": True,
+    }, tool_client)
+    assert_test(r3_del_solo["isError"] is False, "R3: Deleting standalone product succeeds")
+    r3_solo_parsed = json.loads(r3_del_solo["content"][0]["text"])
+    assert_test(r3_solo_parsed.get("updated_grouped_parents") == [], "R3: Standalone delete reports updated_grouped_parents: []")
+
+    # 3. Moving a child to trash (force=False) does NOT remove it from parent
+    r3_trash_child = await execute_tool("delete_product", {
+        "product_id": 52,
+        "force": False,
+    }, tool_client)
+    assert_test(r3_trash_child["isError"] is False, "R3: Moving child to trash succeeds")
+    r3_trash_parsed = json.loads(r3_trash_child["content"][0]["text"])
+    assert_test(r3_trash_parsed.get("updated_grouped_parents") == [], "R3: Trashing child does not remove from parents (updated_grouped_parents: [])")
+
+    # 4. Safety net: get_product(54) filters out nonexistent child 53
+    r3_get_parent = await execute_tool("get_product", {"product_id": 54}, tool_client)
+    assert_test(r3_get_parent["isError"] is False, "R3: get_product(54) succeeds")
+    r3_parent_parsed = json.loads(r3_get_parent["content"][0]["text"])
+    assert_test(r3_parent_parsed.get("grouped_products") == [52], "R3: Safety net: get_product(54) returns only existing child [52]")
+
+    # -------------------------------------------------------------------------
+    # TEST 23: Fixes for Subtotal, Refunds, Search Status, Pagination & Slugs
+    # -------------------------------------------------------------------------
+    print_test_header(23, "Order Subtotal, Refunds, Search Status, Pagination Metadata & Attribute Slugs")
+
+    # 1. Order Subtotal is accurately calculated from line items (not discount_total 0.00)
+    raw_test_order = {
+        "id": 72,
+        "number": "72",
+        "status": "completed",
+        "total": "60.00",
+        "discount_total": "0.00",
+        "shipping_total": "0.00",
+        "total_tax": "0.00",
+        "line_items": [
+            {"id": 1, "product_id": 10, "name": "Shirt", "quantity": 1, "price": "25.00", "subtotal": "25.00", "total": "25.00"},
+            {"id": 2, "product_id": 11, "name": "Pants", "quantity": 1, "price": "35.00", "subtotal": "35.00", "total": "35.00"},
+        ],
+        "refunds": [
+            {"id": 801, "reason": "Customer return", "total": "-30.00"}
+        ],
+    }
+    formatted_order_72 = tool_client._format_order(raw_test_order)
+    assert_test(formatted_order_72.get("subtotal") == "60.00", "Fix 1: Order 72 subtotal correctly calculates 60.00 (not 0.00)")
+    assert_test(formatted_order_72.get("total") == "60.00", "Fix 1: Order 72 gross total is 60.00")
+
+    # 2. get_order exposes refunds list, total_refunded, and net_total
+    assert_test(formatted_order_72.get("total_refunded") == "30.00", "Fix 2: Exposes total_refunded as 30.00")
+    assert_test(formatted_order_72.get("net_total") == "30.00", "Fix 2: Exposes net_total as 30.00")
+    assert_test(len(formatted_order_72.get("refunds", [])) == 1, "Fix 2: Exposes refunds list")
+    assert_test(formatted_order_72["refunds"][0].get("total") == "30.00", "Fix 2: Exposes individual refund total")
+
+    # 3. search_products defaults to status='publish' when omitted (does not return drafts)
+    captured_payloads.clear()
+    await execute_tool("search_products", {
+        "min_price": "10.00",
+        "max_price": "50.00",
+    }, tool_client)
+    search_call = captured_payloads[-1]["url"]
+    assert_test("status=publish" in search_call, "Fix 3: search_products defaults status=publish when omitted (excluding drafts)")
+
+    # 4. list_products honors per_page=100 and returns pagination metadata
+    captured_payloads.clear()
+    list_prods_res = await execute_tool("list_products", {
+        "page": 1,
+        "per_page": 100,
+    }, tool_client)
+    assert_test(list_prods_res["isError"] is False, "Fix 4: list_products with per_page=100 succeeds")
+    assert_test("per_page=100" in captured_payloads[-1]["url"], "Fix 4: Forwards per_page=100 to WooCommerce")
+    prods_envelope = json.loads(list_prods_res["content"][0]["text"])
+    assert_test("products" in prods_envelope, "Fix 4: Returns 'products' array")
+    assert_test("total_count" in prods_envelope, "Fix 4: Returns 'total_count'")
+    assert_test("total_pages" in prods_envelope, "Fix 4: Returns 'total_pages'")
+    assert_test(prods_envelope.get("per_page") == 100, "Fix 4: Envelope contains per_page=100")
+
+    # 5. create_refund response shows effect on order (original total, refunded amount, net total)
+    tool_client.simulate_missing_gateway = False
+    ref_effect_res = await execute_tool("create_refund", {
+        "order_id": 301,
+        "amount": "20.00",
+        "reason": "Clear refund effect test",
+        "api_refund": False,
+    }, tool_client)
+    assert_test(ref_effect_res["isError"] is False, "Fix 5: create_refund succeeds")
+    ref_effect = json.loads(ref_effect_res["content"][0]["text"])
+    assert_test(ref_effect.get("refund_amount") == "20.00", "Fix 5: Returns refund_amount")
+    assert_test(ref_effect.get("order_original_total") == "50.00", "Fix 5: Returns order_original_total")
+    assert_test(ref_effect.get("total_refunded") == "20.00", "Fix 5: Returns total_refunded")
+    assert_test(ref_effect.get("net_total") == "30.00", "Fix 5: Returns net_total (50 - 20 = 30)")
+
+    # 6. Variation attribute slugs are consistently lowercased ("size" vs "Size")
+    parent_prod = tool_client._format_product({
+        "id": 200,
+        "name": "Variable Hoodie",
+        "type": "variable",
+        "attributes": [{"id": 0, "name": "Size", "slug": "Size", "options": ["S", "M", "L"]}],
+    })
+    assert_test(parent_prod["attributes"][0]["slug"] == "size", "Fix 6: Parent product attribute slug normalized to 'size'")
+
+    var_item = tool_client._format_variation({
+        "id": 201,
+        "parent_id": 200,
+        "attributes": [{"id": 0, "name": "Size", "slug": "Size", "option": "M"}],
+    })
+    assert_test(var_item["attributes"][0]["slug"] == "size", "Fix 6: Variation attribute slug normalized to 'size'")
+
+    # -------------------------------------------------------------------------
+    # TEST 24: Pagination Envelopes, Clean Refund Responses, Variation Error & Category Management
+    # -------------------------------------------------------------------------
+    print_test_header(24, "Pagination Envelopes, Clean Refund Response, Variation Error & Category Management")
+
+    # 1. Consistent Pagination: search_products, list_categories, list_variations return total_count & total_pages
+    s_prods = await execute_tool("search_products", {"query": "Hoodie"}, tool_client)
+    assert_test(s_prods["isError"] is False, "TEST 24: search_products succeeds")
+    s_parsed = json.loads(s_prods["content"][0]["text"])
+    assert_test("products" in s_parsed and "total_count" in s_parsed and "total_pages" in s_parsed, "TEST 24: search_products returns pagination envelope with total_count & total_pages")
+
+    cat_env = await execute_tool("list_categories", {}, tool_client)
+    assert_test(cat_env["isError"] is False, "TEST 24: list_categories succeeds")
+    c_parsed = json.loads(cat_env["content"][0]["text"])
+    assert_test("categories" in c_parsed and "total_count" in c_parsed and "total_pages" in c_parsed, "TEST 24: list_categories returns pagination envelope with total_count & total_pages")
+
+    var_env = await execute_tool("list_variations", {"product_id": 99}, tool_client)
+    assert_test(var_env["isError"] is False, "TEST 24: list_variations succeeds")
+    v_parsed = json.loads(var_env["content"][0]["text"])
+    assert_test("variations" in v_parsed and "total_count" in v_parsed and "total_pages" in v_parsed, "TEST 24: list_variations returns pagination envelope with total_count & total_pages")
+
+    # 2. Clean Refund Response: no duplicated fields
+    refund_clean = await execute_tool("create_refund", {
+        "order_id": 301,
+        "amount": "10.00",
+        "reason": "Clean fields test",
+        "api_refund": False,
+    }, tool_client)
+    assert_test(refund_clean["isError"] is False, "TEST 24: create_refund succeeds")
+    ref_dict = json.loads(refund_clean["content"][0]["text"])
+    # Verify non-redundant fields
+    assert_test("refund_amount" in ref_dict and "amount" not in ref_dict, "TEST 24: create_refund has refund_amount without redundant amount")
+    assert_test("order_original_total" in ref_dict and "order_total" not in ref_dict and "total" not in ref_dict, "TEST 24: create_refund has order_original_total without redundant total/order_total")
+    assert_test("order_status" in ref_dict and "status" not in ref_dict, "TEST 24: create_refund has order_status without redundant status")
+    assert_test("net_total" in ref_dict and "order_net_total" not in ref_dict, "TEST 24: create_refund has net_total without redundant order_net_total")
+
+    # 3. Specific Variation Error Message: "Requested Variation not found in WooCommerce."
+    class VarNotFoundWCClient(WooCommerceClient):
+        async def _async_http_call(self, url, method, headers, body=None):
+            return 404, json.dumps({"code": "woocommerce_rest_invalid_id", "message": "Invalid variation ID"}), {}
+
+    vnf_client = VarNotFoundWCClient(
+        store_url="https://mock.example.com",
+        consumer_key="ck_test",
+        consumer_secret="cs_test",
+    )
+    del_var_fail = await execute_tool("delete_variation", {"product_id": 99, "variation_id": 9999}, vnf_client)
+    assert_test(del_var_fail["isError"] is True, "TEST 24: delete non-existent variation returns error")
+    assert_test("Requested Variation not found" in del_var_fail["content"][0]["text"], "TEST 24: Error names 'Variation' specifically instead of generic 'products'")
+
+    # 4. Category Management: update_category, delete_category, batch_update_categories
+    upd_cat_res = await execute_tool("update_category", {
+        "category_id": 19,
+        "name": "Men's Apparel",
+        "description": "Clothing for men",
+    }, tool_client)
+    assert_test(upd_cat_res["isError"] is False, "TEST 24: update_category succeeds")
+    upd_cat_data = json.loads(upd_cat_res["content"][0]["text"])
+    assert_test(upd_cat_data.get("name") == "Men's Apparel", "TEST 24: update_category updates name")
+
+    del_cat_res = await execute_tool("delete_category", {
+        "category_id": 19,
+        "force": True,
+    }, tool_client)
+    assert_test(del_cat_res["isError"] is False, "TEST 24: delete_category succeeds")
+    del_cat_data = json.loads(del_cat_res["content"][0]["text"])
+    assert_test(del_cat_data.get("deleted") is True, "TEST 24: delete_category confirms deletion")
+
+    batch_cat_res = await execute_tool("batch_update_categories", {
+        "create": [{"name": "Accessories"}],
+        "update": [{"id": 20, "name": "Footwear & Boots"}],
+        "delete": [30, 31],
+    }, tool_client)
+    assert_test(batch_cat_res["isError"] is False, "TEST 24: batch_update_categories succeeds")
+    batch_cat_data = json.loads(batch_cat_res["content"][0]["text"])
+    assert_test("create" in batch_cat_data and "update" in batch_cat_data and "delete" in batch_cat_data, "TEST 24: batch_update_categories returns create, update, delete results")
+
     print(f"\n{GREEN}{'='*70}")
-    print("   ALL 14 DCR PROXY, RATE LIMITING & LIVE WORKER TESTS PASSED!   ")
+    print("   ALL 24 TESTS (DCR, WORKER, BUGFIXES, R1-R3, STORE FIXES, METADATA & CATEGORIES) PASSED! ")
     print(f"{'='*70}{RESET}\n")
 
 
