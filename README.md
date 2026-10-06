@@ -4,8 +4,7 @@
 
 ### 1. Clone & install dependencies
 ```bash
-git clone <repo-url>
-cd woocommerce_mcp
+git clone https://github.com/DivynshSingh/WooCommerce-PrivateConnector.git
 pip install -r requirements.txt
 ```
 
@@ -14,21 +13,19 @@ Copy `.env.example` to `.env`:
 ```bash
 cp .env.example .env
 ```
-Fill in your credentials:
-- **`WOOCOMMERCE_STORE_URL`**: Your store URL (e.g., `https://your-store.example.com`).
-- **`WOOCOMMERCE_CONSUMER_KEY`** & **`WOOCOMMERCE_CONSUMER_SECRET`**: Generated with Read/Write permissions under **WooCommerce > Settings > Advanced > REST API**.
-- **`OAUTH_AUTH_SERVER_URL`**: Your OAuth 2.1 provider base URL (e.g. Auth0 tenant, Keycloak, or Zitadel).
-- **`OAUTH_AUDIENCE`**: Your MCP server's public identifier URL.
+Fill in your store & OAuth credentials:
+- `WOOCOMMERCE_STORE_URL`: Your store URL (e.g. `https://your-store.example.com`)
+- `WOOCOMMERCE_CONSUMER_KEY` & `WOOCOMMERCE_CONSUMER_SECRET`: Generated with Read/Write permissions in **wp-admin of your wordpress hosted site > WooCommerce > Settings > Advanced > REST API**
+- `OAUTH_AUTH_SERVER_URL`: Your Auth0 / OAuth 2.1 tenant domain
+- `OAUTH_AUDIENCE`: Your MCP server public URL
 
 ### 3. Run the server
-
-Choose whichever runtime suits your setup:
 
 - **Local HTTP (Port 3000):**
   ```bash
   python3 -m server --http --host 0.0.0.0 --port 3000
   ```
-  The MCP JSON-RPC endpoint is live at `http://localhost:3000/mcp`.
+  Accessible at `http://localhost:3000/mcp`.
 
 - **Local STDIO (Claude Desktop direct):**
   ```bash
@@ -36,27 +33,29 @@ Choose whichever runtime suits your setup:
   ```
 
 - **Cloudflare Workers (Edge deployment):**
-  Set secrets via Wrangler:
   ```bash
   npx wrangler secret put WOOCOMMERCE_CONSUMER_KEY
   npx wrangler secret put WOOCOMMERCE_CONSUMER_SECRET
   npx wrangler deploy
   ```
 
-### 4. Run tests
-To verify all 24 tool, authentication, DCR, and catalog tests:
+### 4. Run local tests (No LLM, please add your mcp server to your claude and ask claude to use all tools on the mcp server)
+To run the full test suite (covering all 21 tools across 24 test suites):
 ```bash
 python3 test_mcp.py
 ```
 
-*(Note: For an in-depth architectural breakdown, RFC 9728 discovery setup, Auth0/Keycloak configuration details, and hosting alternatives, please check `setup.md`.)*
+*(Note: For a detailed architectural breakdown, DCR setup, and hosting alternatives, see `setup.md`.)*
 
 ---
 
-## Assumptions & Limitations
+## Assumptions & Practical Limitations
 
-- **WooCommerce REST API:** Assumes the WooCommerce REST API v3 is enabled with valid Read/Write consumer keys.
-- **Stateless OAuth Verification:** Assumes incoming Bearer JWT tokens are signed with RS256/ES256 and verifiable against the authorization server's public JWKS endpoint (`/.well-known/jwks.json`).
-- **Payment Gateways & Refunds:** Automated gateway refunds require an active payment gateway configured on the order. For orders created without a payment gateway (or offline orders), `create_refund` should be called with `api_refund=false` to record a manual refund.
-- **Variable Product Stock:** In WooCommerce, stock status on variable parent products is derived from child variations; stock adjustments should target individual variations.
-- **Credentials & Git Hygiene:** Live API keys, passwords, and `.env` files are excluded from version control via `.gitignore`. Placeholders and variable documentation are maintained in `.env.example`.
+- **Store-Managed Business Logic vs. Server Layer:** Some behaviors strictly belong to WooCommerce's internal lifecycle rather than the MCP server. For example:
+  - When inventory drops to 0, WooCommerce itself should handle the transition from `instock` to `outofstock` based on store catalog settings. While the MCP server guards against invalid inputs, it delegates catalog lifecycle side-effects to WooCommerce.
+  - On variable products, stock status is derived from variations—attempting to force `instock` on a parent variable product whose variants are all out of stock is ignored by WooCommerce (and the mcp server returns warnings accordingly).
+- **Colocated DCR Proxy on the Worker:** The dynamic client registration endpoint (`/oauth/register`) is hosted right on the Cloudflare Worker alongside the MCP server code, acting as an intermediary proxy to Auth0's `/oidc/register`. In enterprise architectures, the authorization server handles DCR directly. However, because desktop AI clients (like Claude) require specific fields (`response_types: ['code']`, `token_endpoint_auth_method: 'none'`) that Auth0 doesn't format out of the box without manual app patching, this proxy bridges the gap and prevents desktop clients from hitting Auth0 tenant application ceilings.
+- **Manual vs. Gateway Refunds:** WooCommerce's API rejects automated refund requests if the order was placed without an online payment gateway (or with cash on delivery/test checkouts). To handle this without crashing tool calls, manual refunds require passing `api_refund=false`, which records the refund on WooCommerce ledger without querying a non-existent payment processor.
+- **Orphaned IDs in Grouped Products:** WooCommerce's core REST API does not automatically scrub child IDs from grouped parent products when a child item is deleted. The MCP server actively tracks parent references on permanent deletes and scrubs dangling IDs as a safety net.
+- **Trashing Orders via DELETE Endpoint:** WooCommerce doesn't allow setting an order status to `"trash"` via the update (`PUT`) endpoint (it throws `Invalid parameter(s): status`). To trash an order through `update_order_status`, the server routes the call to WooCommerce's `DELETE /wp-json/wc/v3/orders/<id>?force=false` endpoint under the hood.
+- **HTML Cleanup on Text Outputs:** WooCommerce stores rich product descriptions wrapped in WordPress `<p>` and formatting tags. The server strips raw wrapping tags to deliver clean markdown text to LLMs without consuming excess prompt tokens.
