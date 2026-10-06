@@ -340,9 +340,7 @@ async def on_fetch(request, env):
             )
 
         auth_servers = []
-        if worker_origin:
-            auth_servers.append(worker_origin)
-        if server.config.oauth_auth_server_url and server.config.oauth_auth_server_url not in auth_servers:
+        if server.config.oauth_auth_server_url:
             auth_servers.append(server.config.oauth_auth_server_url)
 
         protected_resource_metadata = {

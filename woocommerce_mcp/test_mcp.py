@@ -700,12 +700,12 @@ async def run_all_tests():
     if not wrangler_cmd:
         print(f"   {YELLOW}⚠ SKIP: 'wrangler' / 'npx' not installed in PATH.{RESET}")
     else:
-        cmd = ["npx", "wrangler", "dev", "--port", "8787", "--ip", "127.0.0.1"]
-        pkg_dir = os.path.dirname(os.path.abspath(__file__))
+        root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        cmd = ["npx", "wrangler", "dev", "--config", "woocommerce_mcp/wrangler.toml", "--port", "8789", "--ip", "127.0.0.1"]
         print("   Starting local Cloudflare Worker via 'npx wrangler dev'...")
         proc = subprocess.Popen(
             cmd,
-            cwd=pkg_dir,
+            cwd=root_dir,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             preexec_fn=os.setsid if hasattr(os, "setsid") else None,
@@ -714,7 +714,7 @@ async def run_all_tests():
         try:
             # Poll for worker readiness (up to 15 seconds)
             ready = False
-            base_worker_url = "http://127.0.0.1:8787"
+            base_worker_url = "http://127.0.0.1:8789"
             for _ in range(30):
                 await asyncio.sleep(0.5)
                 if proc.poll() is not None:
