@@ -79,6 +79,8 @@ def inject_env_variables(env) -> None:
         "OAUTH_RESOURCE_SERVER_URL",
         "OAUTH_AUDIENCE",
         "OAUTH_ISSUER",
+        "OAUTH_CLIENT_ID",
+        "AUTH0_STATIC_CLIENT_ID",
         "OAUTH_JWKS_CACHE_TTL_SECONDS",
         "MCP_RATE_LIMIT_MAX_REQUESTS",
         "MCP_RATE_LIMIT_WINDOW_SECONDS",
@@ -136,6 +138,10 @@ def get_server_for_env(env) -> MCPServer:
     oauth_resource_url = (
         get_var("OAUTH_RESOURCE_SERVER_URL", "").rstrip("/")
         or get_var("RESOURCE_SERVER_URL", "").rstrip("/")
+    )
+    auth0_static_client_id = (
+        get_var("OAUTH_CLIENT_ID", "")
+        or get_var("AUTH0_STATIC_CLIENT_ID", "")
     )
 
     try:
@@ -199,6 +205,7 @@ def get_server_for_env(env) -> MCPServer:
         unauth_rate_limit_window_seconds=unauth_rate_limit_window,
         wc_max_retries=wc_max_retries,
         wc_timeout_seconds=wc_timeout,
+        auth0_static_client_id=auth0_static_client_id,
     )
     _server_instance = MCPServer(config)
     return _server_instance
@@ -476,6 +483,7 @@ async def on_fetch(request, env):
             payload,
             auth_server_url=server.config.oauth_auth_server_url,
             audience=server.config.oauth_audience,
+            static_client_id=server.config.auth0_static_client_id,
         )
         return Response.new(
             json.dumps(dcr_resp),
