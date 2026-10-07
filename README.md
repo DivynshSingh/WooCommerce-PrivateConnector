@@ -39,8 +39,8 @@ There is no vendor lock-in but setting up authorization server is a hassle somet
       - In Management Dashboard goto Authentication > Database > Settings > Scroll to bottom to find `Promote Connection to Domain Level` and enable this setting.
       - Now we create an entry in our auth database. In management dashboard go to `User Management` > `Users`. Creat a User with mail and password, save this credential it will be used to authorize MCP client to mcp server.
 
-  - Come back to the MCP codebase now. Add the `OAUTH_AUTH_SERVER_URL` to `wrangler.toml`. `OAUTH_AUTH_SERVER_URL` is the url to auth0 server we just created.
-    Your OAUTH_AUTH_SERVER url is `https://{your-tenant-name}.auth0.com/` and you can see your tenant name on the left top corner or in settings / tenant-settings.
+  - Find the `OAUTH_AUTH_SERVER_URL` in `Applications` > `Applications`. Click the `Default App` created automatically, copy the `Domain` this is your OAUTH_AUTH_SERVER_URL.
+    Come back to the MCP codebase now. Add the `OAUTH_AUTH_SERVER_URL` to `wrangler.toml`.
   - setup SECRET API keys for MCP server:
     - Goto your wordpress site admin page then to > `WooCommerce` > `Settings` > `Advanced` > `REST API`, and generate consumer key and secret. Copy and save the key and secret, it will not be shown again.
     - Run:
