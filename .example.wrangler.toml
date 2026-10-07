@@ -5,20 +5,20 @@ compatibility_flags = ["python_workers"]
 
 # Default non-sensitive environment variables
 [vars]
-WOOCOMMERCE_STORE_URL = "https://your-store-url.com"
+WOOCOMMERCE_STORE_URL = "https://your-store.example.com"
 
 # OAuth 2.0 / 2.1 Authorization Server (Auth0 with RFC 7591 Dynamic Client Registration)
-OAUTH_AUTH_SERVER_URL = "https://your-auth-server-url.com"
-# Optional overrides (JWKS URL and Issuer are automatically derived from OAUTH_AUTH_SERVER_URL if omitted;
-# Audience automatically derives from the Worker's own origin URL if omitted):
-# OAUTH_AUDIENCE = "https://your-mcp-server-url.com"
+OAUTH_AUTH_SERVER_URL = "https://your-tenant.us.auth0.com"
+# Optional overrides:
+OAUTH_AUDIENCE = "https://your-worker-subdomain.workers.dev"
 OAUTH_JWKS_CACHE_TTL_SECONDS = "300"
 
+# Optional Static Client ID (if you pre-register a native/web application in Auth0 or prefer bypassing DCR limits)
+# OAUTH_CLIENT_ID = "your_auth0_client_id"
+
 # Dual-Layer Rate Limiting Policy
-# 1. Authenticated client limit (keyed by token subject)
 MCP_RATE_LIMIT_MAX_REQUESTS = "50"
 MCP_RATE_LIMIT_WINDOW_SECONDS = "10"
-# 2. Unauthenticated client limit (keyed by IP for discovery & handshakes)
 UNAUTH_RATE_LIMIT_MAX_REQUESTS = "20"
 UNAUTH_RATE_LIMIT_WINDOW_SECONDS = "60"
 
@@ -26,6 +26,6 @@ UNAUTH_RATE_LIMIT_WINDOW_SECONDS = "60"
 WOOCOMMERCE_MAX_RETRIES = "3"
 WOOCOMMERCE_TIMEOUT_SECONDS = "15"
 
-# Sensitive secrets (configure via Cloudflare Dashboard or `npx wrangler secret put`):
+# Sensitive secrets (configure via `npx wrangler secret put`):
 # - WOOCOMMERCE_CONSUMER_KEY
 # - WOOCOMMERCE_CONSUMER_SECRET
