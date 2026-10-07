@@ -58,6 +58,7 @@ There is no vendor lock-in but setting up authorization server is a hassle somet
      ```
 
 ### 2. Connect to MCP server
+  - After setting up auth0 and cloudflare, MCP client connection will fail for 10-20 minutes, these will be transient issues as the 2 servers havent synced up. Please wait for a while after which MCP client will successfully connect.
   - Goto your agent and connect to MCP server, authorization page will ask for the authorization credentials that we created in above steps.
 
 Let your agent Use and test the MCP server.
