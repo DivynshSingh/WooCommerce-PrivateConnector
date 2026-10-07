@@ -61,7 +61,7 @@ There is no vendor lock-in but setting up authorization server is a hassle somet
 
 Let your agent Use and test the MCP server.
 
-### 43. Local tests
+### 3. Local tests
 To run the full test suite (covering all 21 tools across 24 test suites):
 ```bash
 python3 test_mcp.py
