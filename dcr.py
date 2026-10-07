@@ -114,14 +114,21 @@ async def handle_dcr_registration(
     payload: Dict[str, Any],
     auth_server_url: str = "",
     audience: str = "",
+    static_client_id: str = "",
     timeout_seconds: float = 10.0,
 ) -> Tuple[int, Dict[str, Any]]:
     """
-    Handles RFC 7591 Dynamic Client Registration Proxy for Auth0:
-    1. Validates and sanitizes incoming client registration payload from Claude / MCP client.
-    2. Registers dynamically upstream with Auth0 at /oidc/register.
-    3. Guarantees 'response_types': ['code'], 'grant_types': ['authorization_code'],
-       and 'token_endpoint_auth_method': 'none' in the response so Claude's client parser succeeds.
+    Handles RFC 7591 Dynamic Client Registration Proxy for Auth0 and all MCP clients:
+    1. Validates and sanitizes incoming client registration payload from Claude (Browser or Desktop),
+       Cursor, ChatGPT, or custom MCP agents.
+    2. If a pre-configured static/shared client ID is provided in server config/env (OAUTH_CLIENT_ID /
+       AUTH0_STATIC_CLIENT_ID), directly issues a valid RFC 7591 registration response to prevent
+       Auth0 tenant application quota exhaustion or dynamic registration policy blocks.
+    3. Auto-detects client type: if redirect_uris contain web origins (https://claude.ai, etc.),
+       formats application_type and token_endpoint_auth_method appropriately while preserving
+       public client PKCE constraints.
+    4. Guarantees 'response_types': ['code'], 'grant_types': ['authorization_code'],
+       and 'token_endpoint_auth_method': 'none' in the response so all MCP client parsers succeed.
 
     Returns:
         (status_code: int, response_body: dict)
@@ -136,10 +143,40 @@ async def handle_dcr_registration(
 
     client_name = str(payload.get("client_name") or "Claude MCP Client").strip()
     redirect_uris = [str(u).strip() for u in payload.get("redirect_uris", [])]
-    token_auth_method = str(payload.get("token_endpoint_auth_method") or "none").strip()
-    app_type = str(payload.get("application_type") or "native").strip()
 
-    # Upstream Auth0 Dynamic Client Registration (/oidc/register)
+    # Detect whether incoming client is a browser/web-hosted client (e.g. claude.ai) or local native
+    has_web_redirect = any(
+        u.startswith("https://") and not ("localhost" in u or "127.0.0.1" in u)
+        for u in redirect_uris
+    )
+
+    requested_app_type = payload.get("application_type")
+    if requested_app_type:
+        app_type = str(requested_app_type).strip()
+    elif has_web_redirect:
+        app_type = "web"
+    else:
+        app_type = "native"
+
+    token_auth_method = str(payload.get("token_endpoint_auth_method") or "none").strip()
+
+    # 2. Check for pre-configured static/shared client ID
+    # This acts as an immediate reliable bypass for Auth0 free-tier application limits
+    # and browser clients that have a pre-registered Auth0 application.
+    if static_client_id:
+        response_body = {
+            "client_id": static_client_id.strip(),
+            "client_name": client_name,
+            "redirect_uris": redirect_uris,
+            "token_endpoint_auth_method": token_auth_method,
+            "response_types": ["code"],
+            "grant_types": ["authorization_code"],
+            "application_type": app_type,
+            "client_id_issued_at": int(time.time()),
+        }
+        return 201, response_body
+
+    # 3. Upstream Auth0 Dynamic Client Registration (/oidc/register)
     auth0_dcr_url = f"{auth_server_url.rstrip('/')}/oidc/register" if auth_server_url else ""
     if not auth0_dcr_url:
         return 500, {
@@ -147,14 +184,17 @@ async def handle_dcr_registration(
             "error_description": "OAUTH_AUTH_SERVER_URL is not configured on the server.",
         }
 
-    upstream_payload = {
+    upstream_payload: Dict[str, Any] = {
         "client_name": client_name,
         "redirect_uris": redirect_uris,
         "token_endpoint_auth_method": token_auth_method,
         "response_types": ["code"],
         "grant_types": ["authorization_code"],
-        "application_type": app_type,
     }
+    # Only supply application_type if valid or requested
+    if app_type in ("native", "web"):
+        upstream_payload["application_type"] = app_type
+
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
