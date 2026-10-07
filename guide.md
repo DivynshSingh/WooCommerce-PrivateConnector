@@ -1,6 +1,6 @@
-# WooCommerce MCP Server — Setup & Deployment Guide
+# WooCommerce MCP Server - Setup & Deployment Guide
 
-This guide walks you through setting up, configuring, and running the **WooCommerce Model Context Protocol (MCP) Server**.
+This guide walks you through setting up, configuring, and running the **WooCommerce Model Context Protocol (MCP) Server**. README.md is the first choice, this .md is only for a deeper dive.
 
 ---
 
@@ -13,16 +13,14 @@ This guide walks you through setting up, configuring, and running the **WooComme
 6. [Hosting & Deployment Options](#6-hosting--deployment-options)
    - [Option A: Cloudflare Workers (Serverless Edge)](#option-a-cloudflare-workers-serverless-edge)
    - [Option B: Self-Hosted Docker / VPS / Local HTTP](#option-b-self-hosted-docker--vps--local-http)
-   - [Option C: Local STDIO (Claude Desktop Direct CLI)](#option-c-local-stdio-claude-desktop-direct-cli)
 7. [Connecting Your AI Client (Claude Desktop, Cursor, ChatGPT)](#7-connecting-your-ai-client)
 8. [Testing & Verification](#8-testing--verification)
-9. [Git & Secrets Hygiene](#9-git--secrets-hygiene)
 
 ---
 
 ## 1. Architecture Overview
 
-The WooCommerce MCP Server acts as a bridge between LLM clients (such as Claude Desktop, Cursor, or AI Studio) and your WooCommerce store catalog:
+The WooCommerce MCP Server is a connector LLM clients to your WooCommerce store catalog:
 
 ```
 ┌──────────────────┐               ┌─────────────────────────────────┐               ┌─────────────────────┐
@@ -48,8 +46,8 @@ The WooCommerce MCP Server acts as a bridge between LLM clients (such as Claude 
 - **RFC 9728 (Protected Resource Metadata)**: Advertises resource metadata, supported scopes (`mcp:read`, `mcp:write`), and the authorization server's URL.
 - **RFC 8414 / OpenID Connect Discovery**: Resolves endpoints via `/.well-known/openid-configuration` or `/.well-known/oauth-authorization-server`.
 - **RFC 7517 (JWKS)**: Validates incoming Bearer JWT tokens using public RSA/EC keys from `/.well-known/jwks.json`.
-- **RFC 7591 (Dynamic Client Registration - DCR)**: The server includes an optional DCR proxy endpoint (`/oauth/register`). For Auth0, this forwards to `/oidc/register`. If you use Keycloak, Okta, Hydra, or Zitadel, this is either configured directly or pointed to their RFC 7591 endpoint.
-- **Any OIDC / OAuth 2.1 Provider works**: You can swap Auth0 for **Keycloak, Zitadel, Ory Hydra, Okta, Authentik, or AWS Cognito** simply by changing `OAUTH_AUTH_SERVER_URL` in your `.env` or `wrangler.toml`.
+- **RFC 7591 (Dynamic Client Registration - DCR)**: The server includes an optional DCR proxy endpoint (`/oauth/register`). For Auth0, this forwards to `/oidc/register`. If you use Keycloak, Zitadel etc this is either configured directly or pointed to their RFC 7591 endpoint.
+- **Any OIDC / OAuth 2.1 Provider works**: You can swap Auth0 for **Keycloak, Zitadel, etc** simply by changing `OAUTH_AUTH_SERVER_URL` in your `wrangler.toml`.
 
 ### Is there any lock-in to Cloudflare Workers?
 **No.** While `worker.py` provides bindings for Cloudflare Workers (Pyodide edge runtime), the core codebase is standard Python:
@@ -64,7 +62,7 @@ The WooCommerce MCP Server acts as a bridge between LLM clients (such as Claude 
 - **Python 3.10+**
 - **Node.js 18+ & npm** (only needed if deploying to Cloudflare Workers via Wrangler)
 - A working **WooCommerce Store** (with REST API enabled)
-- An **OAuth 2.0 / 2.1 provider** (such as an Auth0 free tenant, or Keycloak/Zitadel)
+- An **OAuth 2.0 / 2.1 provider** (such as an Auth0 free tenant)
 
 ---
 
@@ -77,16 +75,16 @@ The WooCommerce MCP Server acts as a bridge between LLM clients (such as Claude 
    - **User**: Select an admin or shop manager user.
    - **Permissions**: `Read/Write`.
 4. Click **Generate API Key**.
-5. Copy both the **Consumer Key** (`ck_...`) and **Consumer Secret** (`cs_...`).
-   *(Save them securely; WooCommerce will only show the Consumer Secret once).*
+5. Copy both the `Consumer Key` and `Consumer Secret`.
+   *(Save these as WooCommerce will not show them again).*
 
 ---
 
 ## 5. Setting Up the Auth Server
 
-### Using Auth0 (Recommended for Quick Cloud Setup)
+### Using Auth0
 
-1. Create a free account at [auth0.com](https://auth0.com).
+1. Create a account at [auth0.com](https://auth0.com).
 2. **Create an API (Resource Server)**:
    - Navigate to **Applications > APIs > Create API**.
    - **Name**: `WooCommerce MCP Server`
@@ -97,12 +95,15 @@ The WooCommerce MCP Server acts as a bridge between LLM clients (such as Claude 
      - `mcp:write` (Write/update access to store catalog and orders)
 3. **Enable Dynamic Client Registration (DCR)** *(if using dynamic registration)*:
    - Navigate to **Settings > Advanced > Dynamic Client Registration**.
-   - Enable **Dynamic Client Registration**.
+   - Enable **Dynamic Client Registration**
 4. **Ensure Default Connection is Enabled**:
-   - Navigate to **Authentication > Database** (or Social).
-   - In your Applications tab, ensure your database connection is toggled ON for new clients (prevents `"no connections enabled for the client"` error).
+   - Navigate to **Authentication > Database**
+   - In your Settings tab, ensure `Promote Connection to Domain Level` is enabled, this gives the tenant this current database as the default authentication connection method.
+5. **Create User Cred**:
+   - goto User Management > Users and create a user, save email and password for this created user as it will be used by you while authorizing your MCP client.
 
-### Using Any Other OAuth 2.0 Provider (Keycloak / Zitadel / Ory)
+
+### You can use another OAuth 2.0 Provider too(Keycloak / Zitadel / Ory)
 1. Create a client with Authorization Code Flow + PKCE (`S256`).
 2. Set the audience / resource identifier to your MCP Server URL.
 3. Configure `OAUTH_AUTH_SERVER_URL` to point to the base URL of your provider (e.g., `https://auth.example.com/realms/myrealm`).
@@ -110,20 +111,17 @@ The WooCommerce MCP Server acts as a bridge between LLM clients (such as Claude 
 
 ---
 
-## 6. Hosting & Deployment Options
+## 6. Hosting & Deployment
 
-### Option A: Cloudflare Workers (Serverless Edge)
+### Cloudflare Workers (Serverless Edge)
 
-Cloudflare Workers runs the Python worker globally with zero cold starts and scale-to-zero pricing.
+Cloudflare Workers runs the Python worker globally with zero cold starts.
 
 1. Navigate to the project directory:
-   ```bash
-   cd woocommerce_mcp
-   ```
 
-2. Copy `.env.example` to create your local config:
+2. Copy `.example.wrangler.toml` to create your local config:
    ```bash
-   cp .env.example .env
+   cp .example.wrangler.toml wrangler.toml
    ```
 
 3. Update `wrangler.toml` with your public URLs:
@@ -155,28 +153,28 @@ Cloudflare Workers runs the Python worker globally with zero cold starts and sca
 
 ---
 
-### Option B: Self-Hosted Docker / VPS / Local HTTP
+### you can go ahead with Self-Hosted Docker / VPS / Local HTTP
 
 To host on a standard Linux server, Docker container, or virtual machine:
 
-1. Clone your repository:
+1. Clone repo:
    ```bash
    git clone <your-repo-url>
    cd <your-repo-name>/woocommerce_mcp
    ```
 
-2. Create a virtual environment:
+2. Create virtual environment:
    ```bash
    python3 -m venv .venv
    source .venv/bin/activate
    pip install -r requirements.txt
    ```
 
-3. Configure `.env`:
+3. Configure `wrangler.toml`:
    ```bash
-   cp .env.example .env
+   cp .example.wrangler.toml wrangler.toml
    ```
-   Edit `.env` and fill in:
+   Edit `wrangler.toml` and fill in:
    - `WOOCOMMERCE_STORE_URL`
    - `WOOCOMMERCE_CONSUMER_KEY`
    - `WOOCOMMERCE_CONSUMER_SECRET`
@@ -191,41 +189,12 @@ To host on a standard Linux server, Docker container, or virtual machine:
 
 ---
 
-### Option C: Local STDIO (Claude Desktop Direct CLI)
 
-For running directly on your personal computer without exposing an open port:
-
-1. In your `claude_desktop_config.json` (on macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`, on Windows: `%APPDATA%\Claude\claude_desktop_config.json`):
-   ```json
-   {
-     "mcpServers": {
-       "woocommerce": {
-         "command": "python3",
-         "args": [
-           "/absolute/path/to/woocommerce_mcp/server.py",
-           "--stdio"
-         ],
-         "env": {
-           "WOOCOMMERCE_STORE_URL": "https://your-store.example.com",
-           "WOOCOMMERCE_CONSUMER_KEY": "ck_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-           "WOOCOMMERCE_CONSUMER_SECRET": "cs_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-           "OAUTH_AUTH_SERVER_URL": "https://your-tenant.us.auth0.com",
-           "OAUTH_AUDIENCE": "https://your-store.example.com"
-         }
-       }
-     }
-   }
-   ```
-2. Restart Claude Desktop.
-
----
 
 ## 7. Connecting Your AI Client
 
-When connecting remote AI clients (like Claude with Remote MCP):
-
 1. **Add Remote MCP Server**:
-   - URL: `https://<your-worker-subdomain>.workers.dev/mcp`
+   - URL: `https://URL-of-your-hosted-mcp-server`
 2. **Handshake flow**:
    - The AI client makes an unauthenticated call to `/mcp`.
    - The server responds with `HTTP 401 Unauthorized` and includes:
@@ -240,11 +209,11 @@ When connecting remote AI clients (like Claude with Remote MCP):
 
 ## 8. Testing & Verification
 
-The repository includes a test suite covering all 24 security, OAuth, and WooCommerce API operations:
+The repository includes a test suite covering all 24 security, OAuth, and WooCommerce API operations, to test before deploying:
 
 ```bash
 # Run the test suite
-python3 woocommerce_mcp/test_mcp.py
+python3 test_mcp.py
 ```
 
 Expected output:
@@ -253,25 +222,3 @@ Expected output:
    ALL 24 TESTS (DCR, WORKER, BUGFIXES, R1-R3, STORE FIXES, METADATA & CATEGORIES) PASSED! 
 ======================================================================
 ```
-
----
-
-## 9. Git & Secrets Hygiene
-
-Never push live credentials to version control.
-
-### Files Safe to Commit:
-- `.env.example` (Template with placeholder values)
-- `wrangler.toml` (With non-sensitive default URLs, no consumer secrets)
-- `setup.md` / `README.md`
-- Python source code (`worker.py`, `wc_client.py`, `server.py`, `auth.py`, `dcr.py`, `tools.py`)
-
-### Files Excluded by `.gitignore`:
-- `.env` and `*.env` (Contains active API keys and client secrets)
-- `.wrangler/` (Local Cloudflare deployment artifacts and state)
-- `__pycache__/` and `*.pyc`
-- `.venv/` and `node_modules/`
-
-If you ever accidentally commit an API key:
-1. Immediately **Revoke and Delete** the key in **WordPress Admin > WooCommerce > Settings > Advanced > REST API**.
-2. Generate a new key and update your local `.env` or `wrangler secret`.
