@@ -5,13 +5,13 @@ compatibility_flags = ["python_workers"]
 
 # Default non-sensitive environment variables
 [vars]
-WOOCOMMERCE_STORE_URL = "https://dev-anythingstore37.pantheonsite.io"
+WOOCOMMERCE_STORE_URL = "https://your-store-url.com"
 
 # OAuth 2.0 / 2.1 Authorization Server (Auth0 with RFC 7591 Dynamic Client Registration)
-OAUTH_AUTH_SERVER_URL = "https://woocommerce-mcp-server-v2.us.auth0.com"
+OAUTH_AUTH_SERVER_URL = "https://your-auth-server-url.com"
 # Optional overrides (JWKS URL and Issuer are automatically derived from OAUTH_AUTH_SERVER_URL if omitted;
 # Audience automatically derives from the Worker's own origin URL if omitted):
-OAUTH_AUDIENCE = "https://woocommerce-mcp-server-v2.woocommerce-connector.workers.dev"
+# OAUTH_AUDIENCE = "https://your-mcp-server-url.com"
 OAUTH_JWKS_CACHE_TTL_SECONDS = "300"
 
 # Dual-Layer Rate Limiting Policy
