@@ -1,4 +1,4 @@
-## Submission: 3. Build a Private Connector for a Mercahnt/ Tool 
+## Submission: 3. Build a Private Connector for a Merchant/ Tool 
 
 ## WooCommerce MCP Server
 
